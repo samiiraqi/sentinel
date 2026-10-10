@@ -4,7 +4,8 @@ READ-ONLY: files are only ever opened for reading. Nothing is written,
 deleted, or modified. Full secrets are redacted before a Finding is built,
 so they never appear in the output.
 
-Usage: python -m agents.secrets.agent <folder>
+Usage: python -m agents.secrets.agent <folder> [--exclude TEXT ...]
+Exit code: 0 = no findings, 1 = findings, 2 = invalid folder.
 """
 
 import argparse
@@ -113,26 +114,45 @@ def scan_text(text: str, rel_path: str) -> list[Finding]:
     return findings
 
 
-def scan_directory(path: str) -> list[Finding]:
-    """Recursively scan a folder for secrets. Never follows symlinks."""
+def _rel(full: str, root: str) -> str:
+    """Path relative to the scan root, always with / separators."""
+    return os.path.relpath(full, root).replace(os.sep, "/")
+
+
+def _is_excluded(rel_path: str, exclude: tuple[str, ...]) -> bool:
+    return any(value in rel_path for value in exclude)
+
+
+def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
+    """Recursively scan a folder for secrets. Never follows symlinks.
+
+    Folders or files whose relative path contains any value in
+    `exclude` are skipped.
+    """
     root = os.path.abspath(path)
     if not os.path.isdir(root):
         raise NotADirectoryError(root)
+    exclude = tuple(v for v in exclude if v)
 
     findings = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        # Prune skipped and symlinked directories in place.
+        # Prune skipped, excluded, and symlinked directories in place.
         dirnames[:] = sorted(
             d
             for d in dirnames
-            if d not in SKIP_DIRS and not os.path.islink(os.path.join(dirpath, d))
+            if d not in SKIP_DIRS
+            and not os.path.islink(os.path.join(dirpath, d))
+            and not _is_excluded(_rel(os.path.join(dirpath, d), root), exclude)
         )
         for name in sorted(filenames):
             full = os.path.join(dirpath, name)
+            rel_path = _rel(full, root)
+            if _is_excluded(rel_path, exclude):
+                continue
             text = _read_text(full)
             if text is None:
                 continue
-            findings.extend(scan_text(text, os.path.relpath(full, root)))
+            findings.extend(scan_text(text, rel_path))
     return findings
 
 
@@ -142,10 +162,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Read-only scan of a folder for hard-coded secrets.",
     )
     parser.add_argument("folder", help="folder to scan")
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="skip folders/files whose path contains TEXT (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        findings = scan_directory(args.folder)
+        findings = scan_directory(args.folder, exclude=tuple(args.exclude))
     except NotADirectoryError as exc:
         print(f"error: not a directory: {exc}", file=sys.stderr)
         return 2

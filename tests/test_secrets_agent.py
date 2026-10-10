@@ -9,12 +9,17 @@ from agents.secrets.agent import main, redact, scan_directory
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# FAKE values, split into pieces so this file does not itself trip the
+# scanner when CI scans the repo.
+FAKE_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+FAKE_ANTHROPIC_KEY = "sk-" + "ant-FAKE-KEY-FOR-TESTS-ONLY-000000"
+
 # Every FAKE secret value in the fixtures. None may appear in any output.
 FAKE_SECRETS = [
-    "AKIAIOSFODNN7EXAMPLE",
+    FAKE_AWS_KEY,
     "FAKEKEYDATAFORTESTSONLYNOTAREALKEY000000",
     "FakePassw0rdForTests",
-    "sk-ant-FAKE-KEY-FOR-TESTS-ONLY-000000",
+    FAKE_ANTHROPIC_KEY,
 ]
 
 
@@ -75,11 +80,11 @@ def test_scan_does_not_modify_files():
 
 def test_redact_short_values_are_not_fully_shown():
     assert redact("abcd") == "ab****"
-    assert redact("AKIAIOSFODNN7EXAMPLE") == "AKIA****"
+    assert redact(FAKE_AWS_KEY) == "AKIA****"
 
 
 def test_skips_binary_symlinks_and_ignored_dirs(tmp_path):
-    secret_line = b"aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"
+    secret_line = f"aws_access_key_id = {FAKE_AWS_KEY}\n".encode()
     (tmp_path / "binary.bin").write_bytes(b"\x00\x01" + secret_line)
     for skipped in (".git", ".venv", "node_modules"):
         (tmp_path / skipped).mkdir()
@@ -92,3 +97,39 @@ def test_skips_binary_symlinks_and_ignored_dirs(tmp_path):
     os.symlink(outside / "leak.txt", tmp_path / "linked_file.txt")
 
     assert scan_directory(str(tmp_path)) == []
+
+
+def test_exclude_skips_matching_folders_and_files(tmp_path):
+    secret_line = f"aws_access_key_id = {FAKE_AWS_KEY}\n"
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "a.txt").write_text(secret_line)
+    (tmp_path / "skip_me").mkdir()
+    (tmp_path / "skip_me" / "b.txt").write_text(secret_line)
+    (tmp_path / "keep" / "skip_me.txt").write_text(secret_line)
+
+    assert {f.file for f in scan_directory(str(tmp_path))} == {
+        "keep/a.txt",
+        "keep/skip_me.txt",
+        "skip_me/b.txt",
+    }
+    found = scan_directory(str(tmp_path), exclude=("skip_me",))
+    assert {f.file for f in found} == {"keep/a.txt"}
+
+
+def test_cli_exclude_option_is_repeatable(tmp_path, capsys):
+    (tmp_path / "one").mkdir()
+    (tmp_path / "one" / "a.txt").write_text(f"key = {FAKE_AWS_KEY}\n")
+    (tmp_path / "two").mkdir()
+    (tmp_path / "two" / "b.txt").write_text(f"key = {FAKE_AWS_KEY}\n")
+
+    assert main([str(tmp_path), "--exclude", "one"]) == 1
+    assert {f["file"] for f in json.loads(capsys.readouterr().out)} == {"two/b.txt"}
+    assert main([str(tmp_path), "--exclude", "one", "--exclude", "two"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_cli_exit_code_1_with_findings_0_when_clean(capsys):
+    assert main([str(FIXTURES)]) == 1
+    assert main([str(FIXTURES), "--exclude", "aws_config", "--exclude", "fake_key",
+                 "--exclude", "settings"]) == 0
+    capsys.readouterr()
