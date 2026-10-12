@@ -162,3 +162,43 @@ def test_server_binds_to_localhost_only(monkeypatch, tmp_path):
     backend_main.main()  # uvicorn.run is replaced; no real server starts
     assert calls == [{"host": "127.0.0.1", "port": 8000}]
     assert "0.0.0.0" not in Path(backend_main.__file__).read_text()
+
+
+@pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1:5173"])
+def test_cors_allows_dashboard_origin(client, origin):
+    resp = client.get("/health", headers={"Origin": origin})
+    assert resp.headers["access-control-allow-origin"] == origin
+    assert "access-control-allow-credentials" not in resp.headers
+
+
+@pytest.mark.parametrize("origin", ["http://evil.example", "http://localhost:3000", "null"])
+def test_cors_rejects_other_origins(client, origin):
+    resp = client.get("/health", headers={"Origin": origin})
+    assert "access-control-allow-origin" not in resp.headers
+    preflight = client.options(
+        "/decisions", headers={"Origin": origin, "Access-Control-Request-Method": "POST"}
+    )
+    assert "access-control-allow-origin" not in preflight.headers
+
+
+def test_cors_preflight_limits_methods_and_headers(client):
+    headers = {"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST"}
+    resp = client.options("/decisions", headers={**headers, "Access-Control-Request-Headers": "content-type"})
+    assert resp.status_code == 200
+    assert set(resp.headers["access-control-allow-methods"].split(", ")) == {"GET", "POST"}
+    assert client.options(
+        "/decisions", headers={**headers, "Access-Control-Request-Method": "DELETE"}
+    ).status_code == 400
+    assert client.options(
+        "/decisions", headers={**headers, "Access-Control-Request-Headers": "authorization"}
+    ).status_code == 400
+
+
+def test_cors_never_returns_wildcard(client):
+    origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://evil.example"]
+    for origin in origins:
+        for resp in (
+            client.get("/report", headers={"Origin": origin}),
+            client.options("/report", headers={"Origin": origin, "Access-Control-Request-Method": "GET"}),
+        ):
+            assert resp.headers.get("access-control-allow-origin") != "*"

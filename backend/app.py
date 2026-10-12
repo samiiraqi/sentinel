@@ -12,6 +12,7 @@ import os
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from approval.decisions import fingerprint, record_decision
@@ -20,6 +21,8 @@ from orchestrator.orchestrator import run_all
 DEFAULT_LOG_PATH = "audit/decisions.jsonl"
 DEFAULT_SELF_EXCLUDE = ("tests/fixtures", ".venv")  # only when scanning "."
 MAX_NOTE_CHARS = 500
+# Only the local dashboard dev server may call the API from a browser. Never "*".
+CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
 class DecisionIn(BaseModel):
@@ -60,6 +63,13 @@ def create_app(
     approver = getpass.getuser()
 
     app = FastAPI(title="Sentinel", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+        allow_credentials=False,
+    )
 
     def build_report() -> dict:
         report = run_all(scan_path, exclude=exclude)
