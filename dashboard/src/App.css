@@ -157,3 +157,111 @@ th {
 tbody tr:last-child td {
   border-bottom: none;
 }
+
+.small {
+  font-size: 0.8rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.filters {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.filter {
+  background: #fff;
+  border: 1px solid #d1d9e0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.filter.active {
+  background: #1f2328;
+  border-color: #1f2328;
+  color: #fff;
+}
+
+.decide {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.note {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 4px 6px;
+  border: 1px solid #d1d9e0;
+  border-radius: 4px;
+}
+
+.buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 0.8rem;
+  color: #fff;
+}
+
+.btn-approve {
+  background: #1a7f37;
+}
+
+.btn-reject {
+  background: #cf222e;
+}
+
+.btn-defer {
+  background: #fff;
+  border-color: #d1d9e0;
+  color: #1f2328;
+}
+
+.row-error {
+  color: #82071e;
+  font-size: 0.8rem;
+}
+
+.decided,
+.deferred {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.decided-approve {
+  background: #dafbe1;
+  color: #116329;
+}
+
+.decided-reject {
+  background: #ffebe9;
+  color: #82071e;
+}
+
+.deferred {
+  background: #fff8c5;
+  color: #7d4e00;
+  margin-bottom: 4px;
+}

@@ -202,3 +202,70 @@ def test_cors_never_returns_wildcard(client):
             client.options("/report", headers={"Origin": origin, "Access-Control-Request-Method": "GET"}),
         ):
             assert resp.headers.get("access-control-allow-origin") != "*"
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def counted(monkeypatch, log):
+    """App with a fake clock; counts how often the orchestrator scans."""
+    import backend.app as backend_app
+
+    calls = []
+    real_run_all = backend_app.run_all
+
+    def counting_run_all(*args, **kwargs):
+        calls.append(1)
+        return real_run_all(*args, **kwargs)
+
+    monkeypatch.setattr(backend_app, "run_all", counting_run_all)
+    clock = FakeClock()
+    client = TestClient(create_app(scan_path=str(FIXTURES), log_path=str(log), clock=clock))
+    return client, clock, calls
+
+
+def test_cache_is_used_for_decision_lookup(counted):
+    client, clock, calls = counted
+    fp = client.get("/report").json()["findings"][0]["fingerprint"]
+    assert len(calls) == 1
+    clock.now += 29
+    assert client.post("/decisions", json={"fingerprint": fp, "decision": "defer"}).status_code == 200
+    assert len(calls) == 1  # lookup came from the cache, no rescan
+
+
+def test_cache_is_cleared_after_a_decision(counted):
+    client, clock, calls = counted
+    fp = client.get("/report").json()["findings"][0]["fingerprint"]
+    client.post("/decisions", json={"fingerprint": fp, "decision": "defer"})
+    client.post("/decisions", json={"fingerprint": fp, "decision": "approve"})
+    assert len(calls) == 2  # second POST had to rescan
+
+
+def test_cache_expires_after_30_seconds(counted):
+    client, clock, calls = counted
+    fp = client.get("/report").json()["findings"][0]["fingerprint"]
+    clock.now += 30
+    assert client.post("/decisions", json={"fingerprint": fp, "decision": "defer"}).status_code == 200
+    assert len(calls) == 2
+
+
+def test_get_report_always_rescans(counted):
+    client, clock, calls = counted
+    client.get("/report")
+    client.get("/report")
+    assert len(calls) == 2
+
+
+def test_unknown_fingerprint_is_404_with_warm_cache(counted, log):
+    client, clock, calls = counted
+    client.get("/report")
+    resp = client.post("/decisions", json={"fingerprint": "0" * 16, "decision": "approve"})
+    assert resp.status_code == 404
+    assert len(calls) == 1
+    assert not log.exists()

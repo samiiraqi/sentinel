@@ -9,7 +9,9 @@ The approver is the server's OS user, never a request field.
 import getpass
 import json
 import os
-from typing import Literal
+import threading
+import time
+from typing import Callable, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +23,7 @@ from orchestrator.orchestrator import run_all
 DEFAULT_LOG_PATH = "audit/decisions.jsonl"
 DEFAULT_SELF_EXCLUDE = ("tests/fixtures", ".venv")  # only when scanning "."
 MAX_NOTE_CHARS = 500
+REPORT_CACHE_SECONDS = 30
 # Only the local dashboard dev server may call the API from a browser. Never "*".
 CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
@@ -54,6 +57,7 @@ def create_app(
     scan_path: str | None = None,
     log_path: str | None = None,
     exclude: tuple[str, ...] = (),
+    clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     scan_path = scan_path or os.environ.get("SENTINEL_SCAN_PATH") or "."
     log_path = log_path or os.environ.get("SENTINEL_AUDIT_LOG") or DEFAULT_LOG_PATH
@@ -71,10 +75,29 @@ def create_app(
         allow_credentials=False,
     )
 
+    # In-memory cache of the latest report, so POST /decisions does not rescan
+    # every time. GET /report always rescans and replaces it; a recorded
+    # decision clears it.
+    cache: dict = {"report": None, "at": 0.0}
+    cache_lock = threading.Lock()
+
     def build_report() -> dict:
         report = run_all(scan_path, exclude=exclude)
         report["findings"] = [{**f, "fingerprint": fingerprint(f)} for f in report["findings"]]
+        with cache_lock:
+            cache["report"], cache["at"] = report, clock()
         return report
+
+    def cached_report() -> dict:
+        with cache_lock:
+            report, at = cache["report"], cache["at"]
+        if report is not None and clock() - at < REPORT_CACHE_SECONDS:
+            return report
+        return build_report()
+
+    def clear_cache() -> None:
+        with cache_lock:
+            cache["report"], cache["at"] = None, 0.0
 
     # Plain "def" endpoints: the scan is blocking work, so FastAPI runs them in a thread pool.
     @app.get("/health")
@@ -91,9 +114,11 @@ def create_app(
 
     @app.post("/decisions")
     def create_decision(body: DecisionIn) -> dict:
-        matches = [f for f in build_report()["findings"] if f["fingerprint"] == body.fingerprint]
+        matches = [f for f in cached_report()["findings"] if f["fingerprint"] == body.fingerprint]
         if not matches:
             raise HTTPException(status_code=404, detail="unknown fingerprint")
-        return record_decision(log_path, matches[0], body.decision, approver, body.note)
+        record = record_decision(log_path, matches[0], body.decision, approver, body.note)
+        clear_cache()
+        return record
 
     return app
