@@ -41,6 +41,10 @@ code {
   border-radius: 6px;
 }
 
+.banner {
+  margin: 12px 0;
+}
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

@@ -269,3 +269,60 @@ def test_unknown_fingerprint_is_404_with_warm_cache(counted, log):
     assert resp.status_code == 404
     assert len(calls) == 1
     assert not log.exists()
+
+
+# ---------------------------------------------------------------- dependencies agent
+
+from agents.dependencies import agent as dependencies_agent  # noqa: E402
+from orchestrator import orchestrator  # noqa: E402
+from shared.models import Finding  # noqa: E402
+
+DEP_FINDING = Finding(
+    agent="dependencies",
+    rule_id="CVE-2018-18074",
+    severity="high",
+    file="requirements.txt",
+    line=1,
+    message="requests 2.19.0: CVE-2018-18074; fixed in: 2.20.0",
+    redacted_match="requests==2.19.0",
+)
+
+
+def _no_tools(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("no tool or network call expected")
+
+    monkeypatch.setattr(dependencies_agent.subprocess, "run", fail)
+
+
+def test_dependencies_findings_in_report_and_decidable(monkeypatch, log):
+    monkeypatch.setitem(orchestrator.AGENTS, "dependencies", lambda path, exclude=(), offline=False: [DEP_FINDING])
+    client = TestClient(create_app(scan_path=str(FIXTURES), log_path=str(log), offline=False))
+    report = client.get("/report").json()
+    assert report["agents"]["dependencies"] == {"status": "ok", "error": None, "count": 1}
+    dep = [f for f in report["findings"] if f["agent"] == "dependencies"]
+    assert [f["rule_id"] for f in dep] == ["CVE-2018-18074"]
+
+    resp = client.post("/decisions", json={"fingerprint": dep[0]["fingerprint"], "decision": "reject"})
+    assert resp.status_code == 200
+    assert resp.json()["rule_id"] == "CVE-2018-18074"
+
+
+def test_offline_env_marks_dependencies_failed(monkeypatch, log):
+    _no_tools(monkeypatch)
+    monkeypatch.setenv("SENTINEL_OFFLINE", "1")
+    report = TestClient(create_app(scan_path=str(FIXTURES), log_path=str(log))).get("/report").json()
+    assert report["agents"]["dependencies"]["status"] == "failed"
+    assert "offline mode" in report["agents"]["dependencies"]["error"]
+    assert report["agents"]["secrets"]["status"] == "ok"
+    assert report["findings"]
+
+
+def test_online_by_default(monkeypatch, log):
+    monkeypatch.delenv("SENTINEL_OFFLINE", raising=False)
+    seen = []
+    monkeypatch.setitem(
+        orchestrator.AGENTS, "dependencies", lambda path, exclude=(), offline=False: seen.append(offline) or []
+    )
+    TestClient(create_app(scan_path=str(FIXTURES), log_path=str(log))).get("/report")
+    assert seen == [False]

@@ -5,8 +5,14 @@ files. It adds no scanning logic of its own. Findings already hold
 redacted values only; nothing raw is added here. If one agent fails, the
 others still run and the failure is recorded in the report.
 
-Usage: python -m orchestrator.orchestrator <folder> [--exclude TEXT ...]
-Exit code: 0 = no findings, 1 = findings, 2 = invalid folder or all agents failed.
+NETWORK: the dependencies agent contacts online vulnerability databases
+(package names and versions only). With --offline it refuses to run and is
+reported as failed with the reason; the other agents run as usual.
+
+Usage: python -m orchestrator.orchestrator <folder> [--exclude TEXT ...] [--offline]
+Exit code: 0 = every agent ran and found nothing, 1 = findings,
+2 = invalid folder or ANY agent failed (the report, with all findings, is
+still printed), so a partial scan never looks clean.
 """
 
 import argparse
@@ -15,6 +21,7 @@ import json
 import os
 import sys
 
+from agents.dependencies import agent as dependencies_agent
 from agents.secrets import agent as secrets_agent
 from agents.terraform import agent as terraform_agent
 from shared.models import SEVERITIES, Finding
@@ -23,7 +30,11 @@ from shared.models import SEVERITIES, Finding
 AGENTS = {
     secrets_agent.AGENT_NAME: secrets_agent.scan_directory,
     terraform_agent.AGENT_NAME: terraform_agent.scan_directory,
+    dependencies_agent.AGENT_NAME: dependencies_agent.scan_directory,
 }
+
+# Agents that contact the network. Only these get the `offline` flag.
+NETWORK_AGENTS = {dependencies_agent.AGENT_NAME}
 
 # rule_id -> severity. Overrides what the agent reported.
 # Written as (rule_id, severity) pairs: the usual dict-literal form would
@@ -58,16 +69,22 @@ def sort_findings(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (_RANK[f.severity], f.file, f.line))
 
 
-def run_all(path: str, exclude: tuple[str, ...] = ()) -> dict:
-    """Run every agent and return one merged report."""
+def run_all(path: str, exclude: tuple[str, ...] = (), offline: bool = False) -> dict:
+    """Run every agent and return one merged report.
+
+    With offline=True, network agents refuse to run and show as failed.
+    """
     if not os.path.isdir(path):
         raise NotADirectoryError(os.path.abspath(path))
 
     agents = {}
     findings = []
     for name, scan in AGENTS.items():
+        kwargs = {"exclude": tuple(exclude)}
+        if name in NETWORK_AGENTS:
+            kwargs["offline"] = offline
         try:
-            found = [apply_severity(f) for f in scan(path, exclude=tuple(exclude))]
+            found = [apply_severity(f) for f in scan(path, **kwargs)]
         except Exception as exc:  # one failing agent must not stop the others
             agents[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "count": 0}
             continue
@@ -104,16 +121,22 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TEXT",
         help="skip folders/files whose path contains TEXT (repeatable)",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="do not contact the network: network agents refuse to run and are reported as failed",
+    )
     args = parser.parse_args(argv)
 
     try:
-        report = run_all(args.folder, exclude=tuple(args.exclude))
+        report = run_all(args.folder, exclude=tuple(args.exclude), offline=args.offline)
     except NotADirectoryError as exc:
         print(f"error: not a directory: {exc}", file=sys.stderr)
         return 2
 
+    # The full report (including any findings) is always printed first.
     print(json.dumps(report, indent=2))
-    if all(info["status"] == "failed" for info in report["agents"].values()):
+    if any(info["status"] == "failed" for info in report["agents"].values()):
         return 2
     return 1 if report["findings"] else 0
 

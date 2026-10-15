@@ -2,7 +2,8 @@
 
 Binds to 127.0.0.1 only, so the API is never exposed on the network.
 Scan folder: SENTINEL_SCAN_PATH (default "."). Audit log: SENTINEL_AUDIT_LOG
-(default audit/decisions.jsonl).
+(default audit/decisions.jsonl). SENTINEL_OFFLINE=1: the dependencies agent
+does not contact online vulnerability databases (it shows as failed).
 """
 
 import uvicorn

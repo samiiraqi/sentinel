@@ -4,6 +4,10 @@ READ-ONLY on scanned files. The scan folder is fixed when the app is
 created and is never taken from a request. The only thing the API writes
 is the append-only audit log, via approval.decisions.record_decision.
 The approver is the server's OS user, never a request field.
+
+NETWORK: every scan runs the dependencies agent, which contacts online
+vulnerability databases (package names and versions only). Set
+SENTINEL_OFFLINE=1 to stop that; the agent then shows as failed.
 """
 
 import getpass
@@ -58,9 +62,12 @@ def create_app(
     log_path: str | None = None,
     exclude: tuple[str, ...] = (),
     clock: Callable[[], float] = time.monotonic,
+    offline: bool | None = None,
 ) -> FastAPI:
     scan_path = scan_path or os.environ.get("SENTINEL_SCAN_PATH") or "."
     log_path = log_path or os.environ.get("SENTINEL_AUDIT_LOG") or DEFAULT_LOG_PATH
+    if offline is None:
+        offline = os.environ.get("SENTINEL_OFFLINE") == "1"
     if not exclude and os.path.abspath(scan_path) == os.path.abspath("."):
         exclude = DEFAULT_SELF_EXCLUDE
     exclude = tuple(exclude)
@@ -82,7 +89,7 @@ def create_app(
     cache_lock = threading.Lock()
 
     def build_report() -> dict:
-        report = run_all(scan_path, exclude=exclude)
+        report = run_all(scan_path, exclude=exclude, offline=offline)
         report["findings"] = [{**f, "fingerprint": fingerprint(f)} for f in report["findings"]]
         with cache_lock:
             cache["report"], cache["at"] = report, clock()

@@ -127,3 +127,19 @@ def test_log_never_contains_full_fake_secret(tmp_path):
     assert len(text.splitlines()) == len(report["findings"])
     for value in FAKE_SECRETS:
         assert value not in text
+
+
+def test_cli_offline_is_passed_to_orchestrator(tmp_path, monkeypatch, capsys):
+    import approval.__main__ as approval_main
+
+    calls = []
+
+    def fake_run_all(path, exclude=(), offline=False):
+        calls.append(offline)
+        return {"agents": {"dependencies": {"status": "failed", "error": "offline mode", "count": 0}}, "findings": []}
+
+    monkeypatch.setattr(approval_main, "run_all", fake_run_all)
+    assert approval_main.main([str(tmp_path), "--offline", "--log", str(tmp_path / "d.jsonl")]) == 0
+    assert approval_main.main([str(tmp_path), "--log", str(tmp_path / "d.jsonl")]) == 0
+    assert calls == [True, False]
+    assert "warning: agent dependencies failed: offline mode" in capsys.readouterr().err

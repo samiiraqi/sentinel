@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agents.dependencies import agent as dependencies_agent
 from orchestrator import orchestrator
 from orchestrator.orchestrator import apply_severity, main, run_all, sort_findings
 from shared.models import Finding
@@ -110,8 +111,11 @@ def test_one_failing_agent_does_not_stop_the_others(tmp_path, monkeypatch, capsy
     assert report["summary"]["by_severity"] == {"critical": 1, "high": 0, "medium": 0, "low": 0}
     assert report["findings"][0]["rule_id"] == "private-key"
 
-    assert main([str(tmp_path)]) == 1
-    capsys.readouterr()
+    # Any failed agent -> exit 2, but the findings are still printed.
+    assert main([str(tmp_path)]) == 2
+    printed = json.loads(capsys.readouterr().out)
+    assert [f["rule_id"] for f in printed["findings"]] == ["private-key"]
+    assert printed["agents"]["terraform"]["status"] == "failed"
 
 
 def test_exit_code_2_when_all_agents_fail(tmp_path, monkeypatch, capsys):
@@ -155,8 +159,126 @@ def test_run_does_not_modify_files():
 
 
 def test_full_secret_never_in_report(capsys):
-    assert main([str(FIXTURES)]) == 1
+    # Without checkov the terraform agent fails, and any failed agent means exit 2.
+    expected = 1 if importlib.util.find_spec("checkov") else 2
+    assert main([str(FIXTURES)]) == expected
     out = capsys.readouterr().out
     assert json.loads(out)["findings"]
     for secret in FAKE_SECRETS:
         assert secret not in out
+
+
+# ---------------------------------------------------------------- dependencies agent
+
+
+def _no_tools(monkeypatch):
+    """Fail the test if any external tool (pip-audit, npm) would be started."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("no tool or network call expected")
+
+    monkeypatch.setattr(dependencies_agent.subprocess, "run", fail)
+
+
+def _all_agents_return(monkeypatch, results):
+    for name in orchestrator.AGENTS:
+        found = results.get(name, [])
+        monkeypatch.setitem(orchestrator.AGENTS, name, lambda path, exclude=(), offline=False, found=found: found)
+
+
+def test_dependencies_agent_is_registered():
+    assert orchestrator.AGENTS["dependencies"] is dependencies_agent.scan_directory
+    assert orchestrator.NETWORK_AGENTS == {"dependencies"}
+
+
+def test_dependencies_findings_are_merged_and_sorted(tmp_path, monkeypatch, capsys):
+    _all_agents_return(
+        monkeypatch,
+        {
+            # One item per line, or our own secrets scan reports this key as a hard-coded secret.
+            "secrets": [
+                _finding("private-key", "low", file="k.pem"),
+            ],
+            "dependencies": [
+                _finding("unpinned-dependency", "medium", file="requirements.txt", line=2, agent="dependencies"),
+                _finding("CVE-2018-18074", "high", file="requirements.txt", line=1, agent="dependencies"),
+            ],
+        },
+    )
+    report = run_all(str(tmp_path))
+    assert [(f["agent"], f["rule_id"]) for f in report["findings"]] == [
+        ("secrets", "private-key"),  # raised to critical by SEVERITY_RULES
+        ("dependencies", "CVE-2018-18074"),
+        ("dependencies", "unpinned-dependency"),
+    ]
+    assert report["agents"]["dependencies"] == {"status": "ok", "error": None, "count": 2}
+    assert report["summary"]["by_agent"]["dependencies"] == 2
+    assert main([str(tmp_path)]) == 1
+    capsys.readouterr()
+
+
+def test_failed_dependencies_agent_is_never_clean(tmp_path, monkeypatch, capsys):
+    # The case that used to exit 0: other agents found nothing, dependencies failed.
+    _all_agents_return(monkeypatch, {})
+
+    def broken(path, exclude=(), offline=False):
+        raise dependencies_agent.DependenciesError(dependencies_agent.PIP_AUDIT_HINT)
+
+    monkeypatch.setitem(orchestrator.AGENTS, "dependencies", broken)
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["dependencies"]["status"] == "failed"
+    assert "pip-audit is not installed" in report["agents"]["dependencies"]["error"]
+    assert report["agents"]["secrets"]["status"] == "ok"
+
+
+def test_real_dependencies_agent_missing_tool_shows_failed(tmp_path, monkeypatch):
+    _no_tools(monkeypatch)
+    monkeypatch.setattr(dependencies_agent, "_pip_audit_installed", lambda: False)
+    (tmp_path / "requirements.txt").write_text("requests==2.19.0\n")
+    report = run_all(str(tmp_path))
+    assert report["agents"]["dependencies"]["status"] == "failed"
+    assert "pip-audit is not installed" in report["agents"]["dependencies"]["error"]
+    assert report["agents"]["secrets"]["status"] == "ok"
+
+
+def test_exit_code_0_only_when_every_agent_ran_clean(tmp_path, monkeypatch, capsys):
+    _all_agents_return(monkeypatch, {})
+    assert main([str(tmp_path)]) == 0
+    capsys.readouterr()
+
+
+def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
+    _no_tools(monkeypatch)
+    (tmp_path / "requirements.txt").write_text("requests==2.19.0\n")
+    calls = []
+
+    # No `offline` parameter: a TypeError here would mean it was passed to a non-network agent.
+    def plain(path, exclude=()):
+        calls.append(path)
+        return []
+
+    monkeypatch.setitem(orchestrator.AGENTS, "secrets", plain)
+    monkeypatch.setitem(orchestrator.AGENTS, "terraform", plain)
+
+    report = run_all(str(tmp_path), offline=True)
+    assert report["agents"]["dependencies"]["status"] == "failed"
+    assert "offline mode" in report["agents"]["dependencies"]["error"]
+    assert report["agents"]["secrets"]["status"] == "ok"
+    assert report["agents"]["terraform"]["status"] == "ok"
+    assert len(calls) == 2
+
+
+def test_cli_offline_flag(tmp_path, monkeypatch, capsys):
+    _no_tools(monkeypatch)
+    (tmp_path / "k.pem").write_text("-----BEGIN " + "RSA PRIVATE KEY-----\nabc\n")
+    assert main([str(tmp_path), "--offline"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert "offline mode" in report["agents"]["dependencies"]["error"]
+    assert report["findings"]  # findings from the other agents are still printed
+
+
+def test_fixtures_need_no_dependency_tools():
+    # Integration tests scan tests/fixtures; with no dependency files there,
+    # they never start pip-audit or npm, so CI makes no network calls.
+    assert dependencies_agent.find_manifests(str(FIXTURES)) == ([], [])

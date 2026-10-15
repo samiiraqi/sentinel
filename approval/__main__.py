@@ -1,6 +1,9 @@
 """Interactive approval CLI. Records decisions only; never runs any action.
 
-Usage: python -m approval <folder> [--exclude TEXT ...] [--log audit/decisions.jsonl]
+Usage: python -m approval <folder> [--exclude TEXT ...] [--log audit/decisions.jsonl] [--offline]
+
+--offline: the dependencies agent does not contact online vulnerability
+databases (it is reported as failed).
 """
 
 import argparse
@@ -36,10 +39,15 @@ def main(argv: list[str] | None = None) -> int:
         help="skip folders/files whose path contains TEXT (repeatable)",
     )
     parser.add_argument("--log", default="audit/decisions.jsonl", help="audit log file (JSON Lines)")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="do not contact the network: network agents refuse to run and are reported as failed",
+    )
     args = parser.parse_args(argv)
 
     try:
-        report = run_all(args.folder, exclude=tuple(args.exclude))
+        report = run_all(args.folder, exclude=tuple(args.exclude), offline=args.offline)
     except NotADirectoryError as exc:
         print(f"error: not a directory: {exc}", file=sys.stderr)
         return 2

@@ -48,12 +48,27 @@ function App() {
           <p className="muted">
             Scanned: <code>{shortPath(state.report.scanned_path)}</code>
           </p>
+          <IncompleteScanBanner agents={state.report.agents} />
           <Summary summary={state.report.summary} />
           <AgentStatusList agents={state.report.agents} />
           <FindingsTable findings={state.report.findings} status={status} onRecorded={onRecorded} />
         </>
       )}
     </main>
+  )
+}
+
+// A failed agent means the totals below are incomplete, so they must never look clean.
+function IncompleteScanBanner({ agents }: { agents: Report['agents'] }) {
+  const failed = Object.entries(agents)
+    .filter(([, info]) => info.status !== 'ok')
+    .map(([name]) => name)
+  if (failed.length === 0) return null
+  return (
+    <p className="error banner" role="alert">
+      <strong>Scan incomplete:</strong> {failed.length} agent(s) failed ({failed.join(', ')}) — these
+      results are not complete. See Agents below for the reason.
+    </p>
   )
 }
 
