@@ -1,32 +1,36 @@
 # Sentinel Requirements
 
 ## Agents
-- [ ] Orchestrator agent that manages the specialist agents
-- [ ] Terraform agent
+- [x] Orchestrator agent that manages the specialist agents
+- [x] Terraform agent
 - [ ] App code agent
 - [ ] Frontend agent
 - [ ] Config / YAML agent
-- [ ] Secrets agent
+- [x] Secrets agent
 - [ ] Dependencies agent
 - [ ] Availability agent
+- [ ] WAF agent (checks WAF config in AWS/Azure code)
+- [ ] CloudFront agent (checks CloudFront config)
+- [ ] SAST agent (static source code scan)
+- [ ] DAST agent (scans a running app; needs a design decision because it sends requests, which conflicts with the read-only rule)
 
 ## Approval
-- [ ] Human-in-the-loop approval for every action
+- [x] Human-in-the-loop approval for every action
 
 ## Backend
-- [ ] Backend API
-- [ ] Audit log of every decision
+- [x] Backend API
+- [x] Audit log of every decision
 
 ## Dashboard
-- [ ] View findings
-- [ ] Approve or reject actions
+- [x] View findings
+- [x] Approve or reject actions
 
 ## Infrastructure as Code
 - [ ] AWS (plan only, never apply)
 - [ ] Azure (plan only, never apply)
 
 ## Automation
-- [ ] GitHub Actions workflows
+- [x] GitHub Actions workflows
 
 ## Security
 - [ ] Security is the top priority in every component
