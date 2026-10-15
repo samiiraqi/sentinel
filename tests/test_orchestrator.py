@@ -177,7 +177,7 @@ def _no_tools(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("no tool or network call expected")
 
-    monkeypatch.setattr(dependencies_agent.subprocess, "run", fail)
+    monkeypatch.setattr(dependencies_agent, "_run_tool", fail)
 
 
 def _all_agents_return(monkeypatch, results):
@@ -282,3 +282,15 @@ def test_fixtures_need_no_dependency_tools():
     # Integration tests scan tests/fixtures; with no dependency files there,
     # they never start pip-audit or npm, so CI makes no network calls.
     assert dependencies_agent.find_manifests(str(FIXTURES)) == ([], [])
+
+
+def test_dependencies_budget_exceeded_shows_failed(tmp_path, monkeypatch, capsys):
+    _no_tools(monkeypatch)  # a 0.5s budget is too little to start any tool
+    monkeypatch.setattr(dependencies_agent, "_pip_audit_installed", lambda: True)
+    monkeypatch.setenv(dependencies_agent.BUDGET_ENV, "0.5")
+    (tmp_path / "requirements.txt").write_text("requests==2.19.0\n")
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["dependencies"]["status"] == "failed"
+    assert "TimeBudgetExceeded: time budget of 0.5s ran out" in report["agents"]["dependencies"]["error"]
+    assert "not audited: requirements.txt (in progress)" in report["agents"]["dependencies"]["error"]

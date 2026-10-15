@@ -292,7 +292,7 @@ def _no_tools(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("no tool or network call expected")
 
-    monkeypatch.setattr(dependencies_agent.subprocess, "run", fail)
+    monkeypatch.setattr(dependencies_agent, "_run_tool", fail)
 
 
 def test_dependencies_findings_in_report_and_decidable(monkeypatch, log):

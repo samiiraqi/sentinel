@@ -19,25 +19,44 @@ READ-ONLY: nothing is installed, fixed, or changed in the scanned folder.
   node_modules is never touched) and a fixed --registry, so a scanned
   repo's .npmrc cannot send the package list elsewhere. "fix" is never run.
 
+TIME BUDGET: one whole scan never runs longer than the budget (default
+300s; set with --time-budget, the budget_seconds parameter, or the
+SENTINEL_DEPS_TIME_BUDGET env var). Each tool run also has its own 300s
+cap. If the budget runs out, the scan fails and says which files were
+audited and which were not; findings so far are not reported, so it never
+looks clean. Every tool runs in its own process group, and the whole
+group is killed on a timeout, so no child process is left running.
+
 Usage: python -m agents.dependencies.agent <folder> [--exclude TEXT ...] [--offline]
-Exit code: 0 = no findings, 1 = findings, 2 = error (including --offline).
+                                           [--time-budget SECONDS]
+Exit code: 0 = no findings, 1 = findings, 2 = error (including --offline and
+an exceeded time budget).
 """
 
 import argparse
 import fnmatch
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+from typing import Callable
 
 from shared.models import Finding
 
 AGENT_NAME = "dependencies"
-TIMEOUT_SECONDS = 300
+TIMEOUT_SECONDS = 300  # cap for a single tool run
+DEFAULT_BUDGET_SECONDS = 300  # cap for a whole scan
+MAX_BUDGET_SECONDS = 3600
+MIN_RUN_SECONDS = 1.0  # do not start a tool with less time than this left
+KILL_WAIT_SECONDS = 5
+BUDGET_ENV = "SENTINEL_DEPS_TIME_BUDGET"
 NPM_REGISTRY = "https://registry.npmjs.org/"
 PIP_AUDIT_HINT = "pip-audit is not installed. Run: pip install -r requirements-dependencies.txt"
 NPM_HINT = "npm is not installed (needed to audit package-lock.json)"
@@ -86,6 +105,114 @@ _OPTION_REASONS = {
 
 class DependenciesError(RuntimeError):
     """A tool is missing, failed, or returned output we cannot read."""
+
+
+class TimeBudgetExceeded(DependenciesError):
+    """The whole-scan time budget ran out before every file was audited."""
+
+
+def resolve_budget(value: float | str | None = None) -> float:
+    """Budget in seconds: `value` if given, else the env var, else the default.
+
+    A bad value (not a number, <= 0, above MAX_BUDGET_SECONDS) is an error,
+    never a silent fallback to the default.
+    """
+    source = "--time-budget"
+    if value is None:
+        value = os.environ.get(BUDGET_ENV)
+        source = BUDGET_ENV
+        if value is None:
+            return float(DEFAULT_BUDGET_SECONDS)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = math.nan
+    if not math.isfinite(seconds) or not 0 < seconds <= MAX_BUDGET_SECONDS:
+        raise DependenciesError(
+            f"invalid time budget from {source}: {value!r} "
+            f"(use a number of seconds above 0 and at most {MAX_BUDGET_SECONDS})"
+        )
+    return seconds
+
+
+class _Budget:
+    """Deadline for one scan, plus which files were audited, so a timeout can say so."""
+
+    def __init__(self, seconds: float, clock: Callable[[], float], pending: list[str]):
+        self.seconds = seconds
+        self.clock = clock
+        self.deadline = clock() + seconds
+        self.pending = list(pending)  # top-level files not started yet
+        self.current: list[str] = []  # files being audited (a file and its includes)
+        self.audited: list[str] = []
+
+    def begin(self, rel: str) -> None:
+        if rel in self.pending:
+            self.pending.remove(rel)
+        self.current.append(rel)
+
+    def finish(self, rel: str) -> None:
+        self.current.remove(rel)
+        self.audited.append(rel)
+
+    def tool_timeout(self) -> float:
+        """Timeout for the next tool run; raises if too little time is left to start it."""
+        remaining = self.deadline - self.clock()
+        if remaining < MIN_RUN_SECONDS:
+            raise self.exceeded()
+        return min(float(TIMEOUT_SECONDS), remaining)
+
+    def timed_out(self, tool: str, rel: str, timeout: float) -> DependenciesError:
+        """The error for a tool run that hit `timeout`."""
+        if self.deadline - self.clock() < MIN_RUN_SECONDS:  # the whole budget is used up
+            return self.exceeded()
+        return DependenciesError(f"{tool} timed out after {timeout:g}s on {rel}")
+
+    def exceeded(self) -> TimeBudgetExceeded:
+        audited = f" ({', '.join(self.audited)})" if self.audited else ""
+        not_audited = [f"{rel} (in progress)" for rel in self.current] + self.pending
+        return TimeBudgetExceeded(
+            f"time budget of {self.seconds:g}s ran out: audited {len(self.audited)} file(s){audited}; "
+            f"not audited: {', '.join(not_audited)}, and any files they include"
+        )
+
+
+def _run_tool(
+    cmd: list[str], timeout: float, cwd: str | None = None, env: dict | None = None
+) -> subprocess.CompletedProcess:
+    """Run a tool in its own process group. On a timeout (or any other error,
+    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
+    posix = os.name == "posix"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+        start_new_session=posix,  # new session: process group id == proc.pid
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        _kill_group(proc, posix)
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _kill_group(proc: subprocess.Popen, posix: bool) -> None:
+    if posix:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already gone
+    else:
+        proc.kill()  # Windows: no process groups here, only the tool itself
+    try:
+        proc.communicate(timeout=KILL_WAIT_SECONDS)  # reap it and drain the pipes
+    except subprocess.TimeoutExpired:
+        # Something outside the group still holds the pipes; the tool itself is dead.
+        proc.wait()
 
 
 def normalize_name(name: str) -> str:
@@ -227,7 +354,7 @@ def _unpinned_findings(file: str, unpinned: list[tuple[int, str]]) -> list[Findi
     ]
 
 
-def _run_pip_audit(pinned: list[tuple[int, str, str]], rel_file: str) -> dict:
+def _run_pip_audit(pinned: list[tuple[int, str, str]], rel_file: str, budget: _Budget) -> dict:
     """Run pip-audit on a temporary file holding only name==version lines."""
     unique = sorted({(normalize_name(n), v) for _, n, v in pinned})
     # pip-audit settings can come from PIP_AUDIT_* env vars (e.g. another
@@ -246,12 +373,11 @@ def _run_pip_audit(pinned: list[tuple[int, str, str]], rel_file: str) -> dict:
             "--format", "json",
             "--progress-spinner", "off",
         ]
+        timeout = budget.tool_timeout()
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, env=env, check=False
-            )
+            proc = _run_tool(cmd, timeout=timeout, env=env)
         except subprocess.TimeoutExpired as exc:
-            raise DependenciesError(f"pip-audit timed out after {TIMEOUT_SECONDS}s on {rel_file}") from exc
+            raise budget.timed_out("pip-audit", rel_file, timeout) from exc
 
     # Exit 0 = clean, 1 = vulnerabilities OR an error, so the JSON decides.
     try:
@@ -296,7 +422,9 @@ def _resolve_include(root_real: str, including: str, value: str, stack: tuple[st
     return target, ""
 
 
-def scan_requirements(root_real: str, real: str, done: set[str], stack: tuple[str, ...] = ()) -> list[Finding]:
+def scan_requirements(
+    root_real: str, real: str, done: set[str], budget: _Budget, stack: tuple[str, ...] = ()
+) -> list[Finding]:
     """Audit one requirements file (a real path inside root_real) and its -r includes.
 
     `done` holds files already scanned, so none is scanned twice; `stack`
@@ -305,6 +433,7 @@ def scan_requirements(root_real: str, real: str, done: set[str], stack: tuple[st
     """
     done.add(real)
     rel_file = os.path.relpath(real, root_real).replace(os.sep, "/")
+    budget.begin(rel_file)
     with open(real, encoding="utf-8", errors="replace") as fh:
         pinned, unpinned, options = parse_requirements(fh.read())
 
@@ -313,7 +442,8 @@ def scan_requirements(root_real: str, real: str, done: set[str], stack: tuple[st
         lines = {}
         for line, name, version in pinned:
             lines.setdefault((normalize_name(name), version), line)
-        findings += parse_pip_audit_output(_run_pip_audit(pinned, rel_file), rel_file, lines)
+        findings += parse_pip_audit_output(_run_pip_audit(pinned, rel_file, budget), rel_file, lines)
+    budget.finish(rel_file)
 
     for line, kind, value, text in options:
         if kind != "requirement":
@@ -323,7 +453,7 @@ def scan_requirements(root_real: str, real: str, done: set[str], stack: tuple[st
         if target is None:
             findings.append(_unaudited(rel_file, line, text, reason))
         elif target not in done:  # already scanned: its findings are reported once
-            findings += scan_requirements(root_real, target, done, stack + (real,))
+            findings += scan_requirements(root_real, target, done, budget, stack + (real,))
     return findings
 
 
@@ -395,7 +525,7 @@ def _npm_path() -> str | None:
     return shutil.which("npm")
 
 
-def _run_npm_audit(folder: str, rel_file: str) -> dict:
+def _run_npm_audit(folder: str, rel_file: str, budget: _Budget) -> dict:
     npm = _npm_path()
     if npm is None:
         raise DependenciesError(NPM_HINT)
@@ -406,12 +536,11 @@ def _run_npm_audit(folder: str, rel_file: str) -> dict:
         "--registry", NPM_REGISTRY,
         "--prefix", folder,
     ]
+    timeout = budget.tool_timeout()
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, cwd=folder, check=False
-        )
+        proc = _run_tool(cmd, timeout=timeout, cwd=folder)
     except subprocess.TimeoutExpired as exc:
-        raise DependenciesError(f"npm audit timed out after {TIMEOUT_SECONDS}s on {rel_file}") from exc
+        raise budget.timed_out("npm audit", rel_file, timeout) from exc
 
     # npm exits 1 when it finds vulnerabilities AND on errors, so the JSON decides.
     try:
@@ -428,11 +557,13 @@ def _run_npm_audit(folder: str, rel_file: str) -> dict:
     return data
 
 
-def scan_lockfile(path: str, rel_file: str) -> list[Finding]:
+def scan_lockfile(path: str, rel_file: str, budget: _Budget) -> list[Finding]:
     """Audit one package-lock.json."""
-    data = _run_npm_audit(os.path.dirname(path), rel_file)
+    budget.begin(rel_file)
+    data = _run_npm_audit(os.path.dirname(path), rel_file, budget)
     with open(path, encoding="utf-8", errors="replace") as fh:
         lock_text = fh.read()
+    budget.finish(rel_file)
     return parse_npm_audit_output(data, rel_file, lock_text)
 
 
@@ -455,16 +586,25 @@ def find_manifests(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[str],
     return requirements, lockfiles
 
 
-def scan_directory(path: str, exclude: tuple[str, ...] = (), offline: bool = False) -> list[Finding]:
+def scan_directory(
+    path: str,
+    exclude: tuple[str, ...] = (),
+    offline: bool = False,
+    budget_seconds: float | str | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[Finding]:
     """Audit every requirements*.txt and package-lock.json under a folder.
 
     Files whose path contains any value in `exclude` are skipped. A tool is
     only needed if files for its ecosystem exist. If a needed tool is
     missing or fails, DependenciesError is raised: a scan that could not
-    check never reports "no vulnerabilities".
+    check never reports "no vulnerabilities". The whole scan is limited to
+    `budget_seconds` (see resolve_budget); running out raises
+    TimeBudgetExceeded, naming the files that were and were not audited.
     """
     if offline:
         raise DependenciesError(OFFLINE_MESSAGE)
+    seconds = resolve_budget(budget_seconds)
     root = os.path.abspath(path)
     if not os.path.isdir(root):
         raise NotADirectoryError(root)
@@ -479,14 +619,16 @@ def scan_directory(path: str, exclude: tuple[str, ...] = (), offline: bool = Fal
     findings = []
     root_real = os.path.realpath(root)
     done: set[str] = set()
+    budget = _Budget(seconds, clock, requirements + lockfiles)
     for rel in requirements:
         real = os.path.realpath(os.path.join(root, rel))
         if not _inside(root_real, real):
+            budget.pending.remove(rel)
             findings.append(_unaudited(rel, 0, rel, "file is a link to outside the scanned folder"))
         elif real not in done:
-            findings += scan_requirements(root_real, real, done)
+            findings += scan_requirements(root_real, real, done, budget)
     for rel in lockfiles:
-        findings += scan_lockfile(os.path.join(root, rel), rel)
+        findings += scan_lockfile(os.path.join(root, rel), rel, budget)
     return findings
 
 
@@ -512,10 +654,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="refuse to run, because this agent needs network access",
     )
+    parser.add_argument(
+        "--time-budget",
+        metavar="SECONDS",
+        default=None,
+        help=f"limit for the whole scan (default: ${BUDGET_ENV} or {DEFAULT_BUDGET_SECONDS})",
+    )
     args = parser.parse_args(argv)
 
     try:
-        findings = scan_directory(args.folder, exclude=tuple(args.exclude), offline=args.offline)
+        findings = scan_directory(
+            args.folder, exclude=tuple(args.exclude), offline=args.offline, budget_seconds=args.time_budget
+        )
     except NotADirectoryError as exc:
         print(f"error: not a directory: {exc}", file=sys.stderr)
         return 2

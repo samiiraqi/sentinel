@@ -8,6 +8,12 @@ The approver is the server's OS user, never a request field.
 NETWORK: every scan runs the dependencies agent, which contacts online
 vulnerability databases (package names and versions only). Set
 SENTINEL_OFFLINE=1 to stop that; the agent then shows as failed.
+
+TIME BUDGET: GET /report waits for the whole scan. The dependencies agent
+is limited by SENTINEL_DEPS_TIME_BUDGET (default 300 seconds). For the
+backend we recommend SENTINEL_DEPS_TIME_BUDGET=120, so a page load never
+waits more than about two minutes for it; if it runs out, the agent shows
+as failed with the files it did not audit.
 """
 
 import getpass

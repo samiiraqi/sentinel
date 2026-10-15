@@ -181,7 +181,7 @@ class FakeTools:
 @pytest.fixture
 def tools(monkeypatch):
     fake = FakeTools()
-    monkeypatch.setattr(agent.subprocess, "run", fake.run)
+    monkeypatch.setattr(agent, "_run_tool", fake.run)
     monkeypatch.setattr(agent, "_pip_audit_installed", lambda: True)
     monkeypatch.setattr(agent, "_npm_path", lambda: "/usr/bin/npm")
     return fake
@@ -391,7 +391,7 @@ def test_no_manifests_needs_no_tools(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("no tool should run")
 
-    monkeypatch.setattr(agent.subprocess, "run", fail)
+    monkeypatch.setattr(agent, "_run_tool", fail)
     monkeypatch.setattr(agent, "_pip_audit_installed", lambda: False)
     monkeypatch.setattr(agent, "_npm_path", lambda: None)
     (tmp_path / "README.md").write_text("hi")
@@ -442,7 +442,7 @@ def test_missing_npm_is_fine_without_lockfiles(tmp_path, tools, monkeypatch):
     ],
 )
 def test_tool_failures_are_errors_not_clean_results(project, monkeypatch, fake, message):
-    monkeypatch.setattr(agent.subprocess, "run", fake.run)
+    monkeypatch.setattr(agent, "_run_tool", fake.run)
     monkeypatch.setattr(agent, "_pip_audit_installed", lambda: True)
     monkeypatch.setattr(agent, "_npm_path", lambda: "/usr/bin/npm")
     with pytest.raises(DependenciesError, match=message):
@@ -456,7 +456,7 @@ def test_timeouts_are_errors(project, tools, monkeypatch, tool):
             raise subprocess.TimeoutExpired(cmd, 1)
         return tools.run(cmd, **kwargs)
 
-    monkeypatch.setattr(agent.subprocess, "run", slow)
+    monkeypatch.setattr(agent, "_run_tool", slow)
     with pytest.raises(DependenciesError, match="timed out"):
         scan_directory(str(project))
 
@@ -465,7 +465,7 @@ def test_offline_refuses_to_run(project, monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("no tool should run")
 
-    monkeypatch.setattr(agent.subprocess, "run", fail)
+    monkeypatch.setattr(agent, "_run_tool", fail)
     with pytest.raises(DependenciesError, match="offline mode"):
         scan_directory(str(project), offline=True)
 
@@ -621,7 +621,7 @@ def test_cli_exit_code_1_with_findings(project, tools, capsys):
 
 def test_cli_exit_code_0_when_clean(tmp_path, monkeypatch, capsys):
     fake = FakeTools(npm=NPM_CLEAN, npm_code=0)
-    monkeypatch.setattr(agent.subprocess, "run", fake.run)
+    monkeypatch.setattr(agent, "_run_tool", fake.run)
     monkeypatch.setattr(agent, "_npm_path", lambda: "/usr/bin/npm")
     (tmp_path / "package-lock.json").write_text(LOCKFILE)
     assert main([str(tmp_path)]) == 0
@@ -657,3 +657,271 @@ def test_live_npm_audit_on_dashboard():
     scan_directory(str(dashboard))  # must not raise; findings depend on the live database
     after = _snapshot(dashboard / "src") | {"lock": _snapshot(dashboard).get(str(dashboard / "package-lock.json"))}
     assert after == before
+
+
+# ---------------------------------------------------------------- time budget
+
+
+@pytest.fixture(autouse=True)
+def _no_budget_env(monkeypatch):
+    # A value set in the developer's shell must not change test results.
+    monkeypatch.delenv(agent.BUDGET_ENV, raising=False)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class TimedTools(FakeTools):
+    """Each tool run "takes" the next duration on the fake clock; no real waiting.
+
+    A run longer than its timeout uses up the timeout, then times out."""
+
+    def __init__(self, clock, durations):
+        super().__init__(pip={"dependencies": [], "fixes": []}, npm=NPM_CLEAN, pip_code=0, npm_code=0)
+        self.clock = clock
+        self.durations = list(durations)
+        self.timeouts = []
+
+    def run(self, cmd, **kwargs):
+        timeout = kwargs["timeout"]
+        self.timeouts.append(timeout)
+        took = self.durations.pop(0)
+        if took > timeout:
+            self.clock.now += timeout
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        self.clock.now += took
+        return super().run(cmd, **kwargs)
+
+
+@pytest.fixture
+def timed(monkeypatch):
+    def make(durations):
+        clock = Clock()
+        fake = TimedTools(clock, durations)
+        monkeypatch.setattr(agent, "_run_tool", fake.run)
+        monkeypatch.setattr(agent, "_pip_audit_installed", lambda: True)
+        monkeypatch.setattr(agent, "_npm_path", lambda: "/usr/bin/npm")
+        return clock, fake
+
+    return make
+
+
+@pytest.fixture
+def three_files(tmp_path):
+    # Scan order: requirements-dev.txt, requirements.txt, web/package-lock.json
+    (tmp_path / "requirements.txt").write_text("requests==2.19.0\n")
+    (tmp_path / "requirements-dev.txt").write_text("six==1.17.0\n")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "package-lock.json").write_text(LOCKFILE)
+    return tmp_path
+
+
+def test_runs_are_capped_and_get_what_is_left(three_files, timed):
+    clock, fake = timed([250, 200, 10])
+    assert scan_directory(str(three_files), budget_seconds=600, clock=clock) == []
+    assert fake.timeouts == [300, 300, 150]  # 600 - 250 = 350, capped at 300; then 600 - 450
+
+
+def test_budget_runs_out_during_a_run(three_files, timed):
+    clock, fake = timed([200, 150])
+    with pytest.raises(agent.TimeBudgetExceeded) as exc:
+        scan_directory(str(three_files), budget_seconds=300, clock=clock)
+    assert fake.timeouts == [300, 100]  # exactly 2 runs started: npm audit never did
+    assert str(exc.value) == (
+        "time budget of 300s ran out: audited 1 file(s) (requirements-dev.txt); "
+        "not audited: requirements.txt (in progress), web/package-lock.json, and any files they include"
+    )
+
+
+def test_budget_spent_before_next_tool_starts(three_files, timed):
+    clock, fake = timed([299.5])  # 0.5s left: too little to start another tool
+    with pytest.raises(agent.TimeBudgetExceeded, match="audited 1 file\\(s\\) \\(requirements-dev.txt\\)"):
+        scan_directory(str(three_files), budget_seconds=300, clock=clock)
+    assert len(fake.calls) == 1
+
+
+def test_budget_runs_out_inside_an_include(tmp_path, timed):
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("requests==2.19.0\n")
+    (tmp_path / "requirements.txt").write_text("-r requirements/base.txt\nsix==1.17.0\n")
+    clock, fake = timed([100, 250])
+    with pytest.raises(agent.TimeBudgetExceeded) as exc:
+        scan_directory(str(tmp_path), budget_seconds=300, clock=clock)
+    assert fake.timeouts == [300, 200]
+    assert str(exc.value) == (
+        "time budget of 300s ran out: audited 1 file(s) (requirements.txt); "
+        "not audited: requirements/base.txt (in progress), and any files they include"
+    )
+
+
+def test_budget_runs_out_on_the_lockfile(three_files, timed):
+    clock, fake = timed([10, 10, 500])
+    with pytest.raises(agent.TimeBudgetExceeded) as exc:
+        scan_directory(str(three_files), budget_seconds=300, clock=clock)
+    assert fake.timeouts == [300, 290, 280]
+    assert "audited 2 file(s) (requirements-dev.txt, requirements.txt)" in str(exc.value)
+    assert "not audited: web/package-lock.json (in progress)" in str(exc.value)
+
+
+def test_per_run_cap_is_not_reported_as_budget(three_files, timed):
+    clock, fake = timed([400])
+    with pytest.raises(DependenciesError) as exc:
+        scan_directory(str(three_files), budget_seconds=3600, clock=clock)
+    assert not isinstance(exc.value, agent.TimeBudgetExceeded)
+    assert str(exc.value) == "pip-audit timed out after 300s on requirements-dev.txt"
+
+
+def test_cli_budget_exceeded_exit_2_never_clean(three_files, timed, capsys):
+    timed([])  # 0.5s budget: no tool may even start, so nothing is waited for
+    assert main([str(three_files), "--time-budget", "0.5"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no findings list, so nothing that looks like a clean result
+    assert "time budget of 0.5s ran out: audited 0 file(s); not audited: requirements-dev.txt (in progress)" in captured.err
+
+
+def test_budget_default_env_and_parameter(monkeypatch):
+    assert agent.resolve_budget() == agent.DEFAULT_BUDGET_SECONDS == 300
+    monkeypatch.setenv(agent.BUDGET_ENV, "120")
+    assert agent.resolve_budget() == 120
+    assert agent.resolve_budget(45) == 45  # parameter / --time-budget beats the env var
+    assert agent.resolve_budget("3600") == 3600
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "99999", "nan", "inf", ""])
+def test_bad_budget_values_are_errors(monkeypatch, tmp_path, capsys, bad):
+    with pytest.raises(DependenciesError, match="invalid time budget from --time-budget"):
+        agent.resolve_budget(bad)
+    monkeypatch.setenv(agent.BUDGET_ENV, bad)
+    with pytest.raises(DependenciesError, match=f"invalid time budget from {agent.BUDGET_ENV}"):
+        agent.resolve_budget()
+    assert main([str(tmp_path)]) == 2  # even with nothing to scan, a bad setting is reported
+    assert "invalid time budget" in capsys.readouterr().err
+
+
+def test_cli_flag_beats_bad_env(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(agent.BUDGET_ENV, "abc")
+    assert main([str(tmp_path), "--time-budget", "60"]) == 0
+    capsys.readouterr()
+
+
+# ---------------------------------------------------------------- process cleanup
+
+
+class FakePopen:
+    """Popen whose first communicate() fails with `first_error`."""
+
+    instances = []
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd, self.kwargs = cmd, kwargs
+        self.pid = 4242
+        self.returncode = -9
+        self.communicate_calls = []
+        self.first_error = FakePopen.next_error
+        FakePopen.instances.append(self)
+
+    def communicate(self, timeout=None):
+        self.communicate_calls.append(timeout)
+        if len(self.communicate_calls) == 1 and self.first_error:
+            raise self.first_error
+        return "", ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX only")
+@pytest.mark.parametrize(
+    "error",
+    [subprocess.TimeoutExpired(["tool"], 5), KeyboardInterrupt()],
+    ids=["timeout", "ctrl-c"],
+)
+def test_run_tool_kills_whole_group_on_error(monkeypatch, error):
+    import signal
+
+    killed = []
+    FakePopen.instances, FakePopen.next_error = [], error
+    monkeypatch.setattr(agent.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(agent.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    with pytest.raises(type(error)):
+        agent._run_tool(["tool"], timeout=5)
+
+    proc = FakePopen.instances[0]
+    assert proc.kwargs["start_new_session"] is True
+    assert killed == [(4242, signal.SIGKILL)]
+    assert proc.communicate_calls == [5, agent.KILL_WAIT_SECONDS]  # reaped after the kill
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX only")
+def test_run_tool_tolerates_group_already_gone(monkeypatch):
+    def gone(pgid, sig):
+        raise ProcessLookupError
+
+    FakePopen.instances, FakePopen.next_error = [], subprocess.TimeoutExpired(["tool"], 5)
+    monkeypatch.setattr(agent.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(agent.os, "killpg", gone)
+    with pytest.raises(subprocess.TimeoutExpired):
+        agent._run_tool(["tool"], timeout=5)
+
+
+def test_run_tool_returns_output():
+    import sys
+
+    proc = agent._run_tool([sys.executable, "-c", "print('hi')"], timeout=30)
+    assert (proc.returncode, proc.stdout.strip()) == (0, "hi")
+
+
+# A child that starts a grandchild, records both PIDs, then sleeps. The
+# grandchild shares the output pipe, so killing only the child would hang.
+CHILD = r"""
+import os, subprocess, sys, time
+grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open(sys.argv[1], "w") as fh:
+    fh.write(f"{os.getpid()} {grandchild.pid}")
+time.sleep(60)
+"""
+
+
+def _alive(pid: int) -> bool:
+    """True if pid is running (a zombie waiting to be reaped counts as gone)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if not Path("/proc").is_dir():
+        return True  # no /proc (macOS): os.kill says it exists
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][0] != "Z"
+    except (OSError, IndexError):
+        return False  # vanished between the two checks
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX only (skipped on Windows)")
+def test_real_timeout_kills_child_and_grandchild(tmp_path):
+    # The one test with real waiting (about 1.5 seconds).
+    import sys
+    import time
+
+    pid_file = tmp_path / "pids"
+    start = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        agent._run_tool([sys.executable, "-c", CHILD, str(pid_file)], timeout=1.5)
+    assert time.monotonic() - start < 10  # did not wait for the 60s sleeps
+
+    pids = [int(p) for p in pid_file.read_text().split()]
+    try:
+        deadline = time.monotonic() + 5
+        while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not any(_alive(p) for p in pids), "child or grandchild still running"
+    finally:
+        for p in pids:  # never leave a stray process behind, even if the test fails
+            try:
+                os.kill(p, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
