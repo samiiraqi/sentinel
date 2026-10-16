@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agents.secrets.agent import main, redact, scan_directory
+from agents.secrets.agent import main, redact, scan_directory, scan_text
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -81,6 +81,49 @@ def test_scan_does_not_modify_files():
 def test_redact_short_values_are_not_fully_shown():
     assert redact("abcd") == "ab****"
     assert redact(FAKE_AWS_KEY) == "AKIA****"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "automountServiceAccountToken: false",
+        "token: False",
+        'api_key = "true"',
+        "secret: 'null'",
+        "PASSWORD=NULL",
+        "token: false # comment",
+        '"token": null,',
+    ],
+    # Plain ids: pytest stores test ids in .pytest_cache, which CI scans.
+    ids=lambda _: "line",
+)
+def test_boolean_and_null_values_are_not_secrets(line):
+    assert scan_text(line, "x.yaml") == []
+
+
+# Keys and values are kept apart and joined at runtime, so this file does not
+# itself trip the scanner when CI scans the repo.
+STILL_FOUND_VALUES = (
+    "falsehood123",
+    "true_" + "secret_key",
+    '"falsetto"',
+    "nullable",
+    "FAKE" + "LongKeyValueForTestsOnly0123456789",
+)
+STILL_FOUND_KEYS = ("token", "password", "passwd", "client_secret", "API-KEY", "auth_token")
+
+
+@pytest.mark.parametrize("value", STILL_FOUND_VALUES)
+@pytest.mark.parametrize("key", STILL_FOUND_KEYS)
+def test_values_that_only_contain_true_false_null_are_still_found(key, value):
+    found = scan_text(f"{key}: {value}", "x.yaml")
+    assert [f.rule_id for f in found] == ["generic-secret-assignment"]
+    assert value.strip('"') not in json.dumps([f.to_dict() for f in found])
+
+
+def test_ignored_value_does_not_hide_a_later_secret_on_the_same_line():
+    found = scan_text("token: false, " + "password: " + FAKE_SECRETS[2], "x.yaml")
+    assert [(f.rule_id, f.redacted_match) for f in found] == [("generic-secret-assignment", "Fake****")]
 
 
 def test_skips_binary_symlinks_and_ignored_dirs(tmp_path):
@@ -184,8 +227,6 @@ def test_cli_exclude_file_option(tmp_path, capsys):
 
 def test_cli_exit_code_1_with_findings_0_when_clean(capsys):
     assert main([str(FIXTURES)]) == 1
-    # config_yaml/good/k8s/deployment.yaml sets automountServiceAccountToken to false,
-    # a known false positive of generic-secret-assignment; this test is about the 3 secret fixtures.
     assert main([str(FIXTURES), "--exclude", "aws_config.ini", "--exclude", "fake_key.pem",
-                 "--exclude", "settings.py", "--exclude", "config_yaml"]) == 0
+                 "--exclude", "settings.py"]) == 0
     capsys.readouterr()
