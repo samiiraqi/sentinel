@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 
 from shared.models import Finding
+from shared.paths import is_excluded
 
 AGENT_NAME = "secrets"
 SKIP_DIRS = {".git", ".venv", "node_modules"}
@@ -119,18 +120,15 @@ def _rel(full: str, root: str) -> str:
     return os.path.relpath(full, root).replace(os.sep, "/")
 
 
-def _is_excluded(rel_path: str, exclude: tuple[str, ...]) -> bool:
-    return any(value in rel_path for value in exclude)
-
-
 def scan_directory(
     path: str, exclude: tuple[str, ...] = (), exclude_files: tuple[str, ...] = ()
 ) -> list[Finding]:
     """Recursively scan a folder for secrets. Never follows symlinks.
 
-    Folders or files whose relative path contains any value in
-    `exclude` are skipped. Files whose relative path (with / separators)
-    is exactly equal to a value in `exclude_files` are skipped.
+    Folders or files matching a value in `exclude` are skipped, by whole
+    path components (see shared.paths.is_excluded), never by substring.
+    Files whose relative path (with / separators) is exactly equal to a
+    value in `exclude_files` are skipped.
     """
     root = os.path.abspath(path)
     if not os.path.isdir(root):
@@ -146,12 +144,12 @@ def scan_directory(
             for d in dirnames
             if d not in SKIP_DIRS
             and not os.path.islink(os.path.join(dirpath, d))
-            and not _is_excluded(_rel(os.path.join(dirpath, d), root), exclude)
+            and not is_excluded(_rel(os.path.join(dirpath, d), root), exclude)
         )
         for name in sorted(filenames):
             full = os.path.join(dirpath, name)
             rel_path = _rel(full, root)
-            if _is_excluded(rel_path, exclude) or rel_path in exclude_files:
+            if is_excluded(rel_path, exclude) or rel_path in exclude_files:
                 continue
             text = _read_text(full)
             if text is None:
@@ -171,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="TEXT",
-        help="skip folders/files whose path contains TEXT (repeatable)",
+        help="skip folders/files named TEXT, or under path TEXT from FOLDER (repeatable)",
     )
     parser.add_argument(
         "--exclude-file",

@@ -11,6 +11,7 @@ import pytest
 from agents.dependencies import agent
 from agents.dependencies.agent import (
     DependenciesError,
+    find_manifests,
     main,
     parse_npm_audit_output,
     parse_pip_audit_output,
@@ -405,6 +406,28 @@ def test_skips_vendored_and_excluded_folders(tmp_path, tools):
         (tmp_path / folder / "package-lock.json").write_text(LOCKFILE)
     assert scan_directory(str(tmp_path), exclude=("vendor",)) == []
     assert tools.calls == []
+
+
+def test_exclude_does_not_hide_lookalike_manifests(tmp_path):
+    hidden = ("vendor/requirements.txt", "web/vendor/package-lock.json", "tests/fixtures/requirements.txt")
+    visible = (
+        "requirements-prod.venv.txt",
+        ".venv-old/requirements.txt",
+        "vendored/package-lock.json",
+        "other/tests/fixtures/requirements.txt",
+    )
+    for rel in hidden + visible:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x\n")
+
+    requirements, lockfiles = find_manifests(str(tmp_path), exclude=(".venv", "vendor", "tests/fixtures"))
+    assert set(requirements) | set(lockfiles) == set(visible)
+
+
+def test_lookalike_manifest_is_audited(tmp_path, tools):
+    (tmp_path / "requirements-prod.venv.txt").write_text("requests==2.19.0\n")
+    scan_directory(str(tmp_path), exclude=(".venv",))
+    assert [c["requirements"] for c in tools.calls] == ["requests==2.19.0\n"]
 
 
 def test_missing_pip_audit_is_an_error(project, tools, monkeypatch):

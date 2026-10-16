@@ -113,7 +113,23 @@ def test_exclude_skips_matching_folders_and_files(tmp_path):
         "skip_me/b.txt",
     }
     found = scan_directory(str(tmp_path), exclude=("skip_me",))
+    # Whole-component match: the folder skip_me/ is skipped, the file
+    # keep/skip_me.txt is not (its name only contains "skip_me").
+    assert {f.file for f in found} == {"keep/a.txt", "keep/skip_me.txt"}
+    found = scan_directory(str(tmp_path), exclude=("skip_me", "skip_me.txt"))
     assert {f.file for f in found} == {"keep/a.txt"}
+
+
+def test_exclude_does_not_hide_lookalike_paths(tmp_path):
+    secret_line = f"aws_access_key_id = {FAKE_AWS_KEY}\n"
+    hidden = (".venv/x.txt", "app/.venv/x.txt", "tests/fixtures/x.txt")
+    visible = ("prod.venv-config", ".venv-old/x.txt", "tests/fixtures_old/a.txt", "other/tests/fixtures/a.txt")
+    for rel in hidden + visible:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(secret_line)
+
+    found = scan_directory(str(tmp_path), exclude=(".venv", "tests/fixtures"))
+    assert {f.file for f in found} == set(visible)
 
 
 def test_cli_exclude_option_is_repeatable(tmp_path, capsys):
@@ -168,6 +184,6 @@ def test_cli_exclude_file_option(tmp_path, capsys):
 
 def test_cli_exit_code_1_with_findings_0_when_clean(capsys):
     assert main([str(FIXTURES)]) == 1
-    assert main([str(FIXTURES), "--exclude", "aws_config", "--exclude", "fake_key",
-                 "--exclude", "settings"]) == 0
+    assert main([str(FIXTURES), "--exclude", "aws_config.ini", "--exclude", "fake_key.pem",
+                 "--exclude", "settings.py"]) == 0
     capsys.readouterr()
