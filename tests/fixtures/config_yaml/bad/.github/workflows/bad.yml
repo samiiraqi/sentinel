@@ -1,0 +1,11 @@
+# FAKE fixture: deliberately insecure workflow for tests (shell injection).
+name: bad
+on:
+  issues:
+    types: [opened]
+jobs:
+  greet:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo "New issue - ${{ github.event.issue.title }}"
