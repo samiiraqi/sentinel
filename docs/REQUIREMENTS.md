@@ -7,7 +7,7 @@
 - [ ] Frontend agent
 - [ ] Config / YAML agent
 - [x] Secrets agent
-- [ ] Dependencies agent
+- [x] Dependencies agent
 - [ ] Availability agent
 - [ ] WAF agent (checks WAF config in AWS/Azure code)
 - [ ] CloudFront agent (checks CloudFront config)
