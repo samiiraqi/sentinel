@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 from shared.models import SEVERITIES, Finding
+from shared.paths import is_excluded
 
 AGENT_NAME = "terraform"
 DEFAULT_SEVERITY = "medium"
@@ -65,14 +66,11 @@ def parse_checkov_output(data: dict | list) -> list[Finding]:
     return findings
 
 
-def _is_excluded(rel_path: str, exclude: tuple[str, ...]) -> bool:
-    return any(value in rel_path for value in exclude)
-
-
 def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     """Run Checkov (Terraform only, offline) on a folder and return Findings.
 
-    Findings whose file path contains any value in `exclude` are skipped.
+    Findings whose file path matches a value in `exclude` (by whole path
+    components, see shared.paths.is_excluded) are skipped.
     """
     root = os.path.abspath(path)
     if not os.path.isdir(root):
@@ -110,7 +108,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     except json.JSONDecodeError as exc:
         raise CheckovError("could not parse checkov JSON output") from exc
 
-    return [f for f in parse_checkov_output(data) if not _is_excluded(f.file, exclude)]
+    return [f for f in parse_checkov_output(data) if not is_excluded(f.file, exclude)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="TEXT",
-        help="skip findings whose file path contains TEXT (repeatable)",
+        help="skip findings in files/folders named TEXT, or under path TEXT from FOLDER (repeatable)",
     )
     args = parser.parse_args(argv)
 

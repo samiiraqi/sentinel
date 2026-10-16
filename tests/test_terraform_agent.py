@@ -1,10 +1,12 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from agents.terraform import agent
 from agents.terraform.agent import main, parse_checkov_output, scan_directory
 
 FIXTURES = Path(__file__).parent / "fixtures" / "terraform"
@@ -128,3 +130,20 @@ def test_scan_does_not_modify_files():
     scan_directory(str(BAD))
     scan_directory(str(GOOD))
     assert _snapshot(FIXTURES) == before
+
+
+def test_exclude_does_not_drop_lookalike_files(tmp_path, monkeypatch):
+    # Offline: Checkov is faked, only the exclude filter is under test.
+    files = ("main.tf", "infra/main.tf", "xmain.tf", "main.tf.bak", "tests/fixtures/a.tf", "other/tests/fixtures/a.tf")
+    output = {"results": {"failed_checks": [
+        {"check_id": "CKV_AWS_24", "check_name": "x", "file_path": "/" + f, "file_line_range": [1, 2]}
+        for f in files
+    ]}}
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(agent.importlib.util, "find_spec",
+                        lambda name, *a: object() if name == "checkov" else real_find_spec(name, *a))
+    monkeypatch.setattr(agent.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, json.dumps(output), ""))
+
+    found = scan_directory(str(tmp_path), exclude=("main.tf", "tests/fixtures"))
+    assert {f.file for f in found} == {"xmain.tf", "main.tf.bak", "other/tests/fixtures/a.tf"}
