@@ -128,6 +128,44 @@ def test_cli_exclude_option_is_repeatable(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out) == []
 
 
+LOOKALIKES = ("old-constraints-ci.txt", "docs/constraints-ci.txt", "constraints-ci.txt.bak")
+
+
+def _write_constraints_lookalikes(root):
+    secret_line = f"aws_access_key_id = {FAKE_AWS_KEY}\n"
+    (root / "docs").mkdir()
+    for rel in ("constraints-ci.txt", *LOOKALIKES):
+        (root / rel).write_text(secret_line)
+
+
+def test_exclude_file_skips_only_the_exact_path(tmp_path):
+    _write_constraints_lookalikes(tmp_path)
+
+    found = scan_directory(str(tmp_path), exclude_files=("constraints-ci.txt",))
+    assert {f.file for f in found} == set(LOOKALIKES)
+    assert all(f.rule_id == "aws-access-key-id" for f in found)
+
+
+def test_exclude_file_does_not_match_folders(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.txt").write_text(f"aws_access_key_id = {FAKE_AWS_KEY}\n")
+
+    found = scan_directory(str(tmp_path), exclude_files=("docs",))
+    assert {f.file for f in found} == {"docs/a.txt"}
+
+
+def test_cli_exclude_file_option(tmp_path, capsys):
+    _write_constraints_lookalikes(tmp_path)
+
+    assert main([str(tmp_path), "--exclude-file", "constraints-ci.txt"]) == 1
+    assert {f["file"] for f in json.loads(capsys.readouterr().out)} == set(LOOKALIKES)
+    args = [str(tmp_path)]
+    for rel in ("constraints-ci.txt", *LOOKALIKES):
+        args += ["--exclude-file", rel]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
 def test_cli_exit_code_1_with_findings_0_when_clean(capsys):
     assert main([str(FIXTURES)]) == 1
     assert main([str(FIXTURES), "--exclude", "aws_config", "--exclude", "fake_key",

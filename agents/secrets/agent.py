@@ -4,7 +4,7 @@ READ-ONLY: files are only ever opened for reading. Nothing is written,
 deleted, or modified. Full secrets are redacted before a Finding is built,
 so they never appear in the output.
 
-Usage: python -m agents.secrets.agent <folder> [--exclude TEXT ...]
+Usage: python -m agents.secrets.agent <folder> [--exclude TEXT ...] [--exclude-file PATH ...]
 Exit code: 0 = no findings, 1 = findings, 2 = invalid folder.
 """
 
@@ -123,16 +123,20 @@ def _is_excluded(rel_path: str, exclude: tuple[str, ...]) -> bool:
     return any(value in rel_path for value in exclude)
 
 
-def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
+def scan_directory(
+    path: str, exclude: tuple[str, ...] = (), exclude_files: tuple[str, ...] = ()
+) -> list[Finding]:
     """Recursively scan a folder for secrets. Never follows symlinks.
 
     Folders or files whose relative path contains any value in
-    `exclude` are skipped.
+    `exclude` are skipped. Files whose relative path (with / separators)
+    is exactly equal to a value in `exclude_files` are skipped.
     """
     root = os.path.abspath(path)
     if not os.path.isdir(root):
         raise NotADirectoryError(root)
     exclude = tuple(v for v in exclude if v)
+    exclude_files = frozenset(v for v in exclude_files if v)
 
     findings = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -147,7 +151,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
         for name in sorted(filenames):
             full = os.path.join(dirpath, name)
             rel_path = _rel(full, root)
-            if _is_excluded(rel_path, exclude):
+            if _is_excluded(rel_path, exclude) or rel_path in exclude_files:
                 continue
             text = _read_text(full)
             if text is None:
@@ -169,10 +173,19 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TEXT",
         help="skip folders/files whose path contains TEXT (repeatable)",
     )
+    parser.add_argument(
+        "--exclude-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="skip the one file whose path relative to FOLDER is exactly PATH (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        findings = scan_directory(args.folder, exclude=tuple(args.exclude))
+        findings = scan_directory(
+            args.folder, exclude=tuple(args.exclude), exclude_files=tuple(args.exclude_file)
+        )
     except NotADirectoryError as exc:
         print(f"error: not a directory: {exc}", file=sys.stderr)
         return 2

@@ -637,6 +637,7 @@ def test_cli_tool_error_exit_code_2(project, tools, monkeypatch, capsys):
 # ---------------------------------------------------------------- live (opt-in, network)
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not LIVE or importlib.util.find_spec("pip_audit") is None,
     reason="live test: set SENTINEL_LIVE_TESTS=1 and pip install -r requirements-dependencies.txt",
@@ -647,6 +648,7 @@ def test_live_pip_audit(tmp_path):
     assert "CVE-2018-18074" in rule_ids
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not LIVE or shutil.which("npm") is None,
     reason="live test: set SENTINEL_LIVE_TESTS=1 and install npm",
