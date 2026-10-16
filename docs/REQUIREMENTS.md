@@ -5,7 +5,7 @@
 - [x] Terraform agent
 - [ ] App code agent
 - [ ] Frontend agent
-- [ ] Config / YAML agent
+- [x] Config / YAML agent (Checkov: Kubernetes, Dockerfile, GitHub Actions; Docker Compose not covered yet)
 - [x] Secrets agent
 - [x] Dependencies agent
 - [ ] Availability agent
