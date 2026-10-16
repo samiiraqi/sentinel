@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
 from orchestrator import orchestrator
 from orchestrator.orchestrator import apply_severity, main, run_all, sort_findings
@@ -60,6 +61,11 @@ def _snapshot(root: Path) -> dict:
         ("CKV_AWS_20", "medium", "high"),
         ("CKV_AWS_3", "low", "medium"),
         ("CKV_AZURE_3", "high", "medium"),
+        ("CKV_K8S_16", "medium", "high"),
+        ("CKV_K8S_19", "medium", "high"),
+        ("CKV_K8S_27", "medium", "high"),
+        ("CKV_GHA_2", "medium", "high"),
+        ("config-unscanned", "low", "low"),
         ("CKV_UNKNOWN_1", "low", "low"),
         ("some-other-rule", "critical", "critical"),
     ],
@@ -150,6 +156,35 @@ def test_integration_includes_terraform_findings():
     tf = [f for f in report["findings"] if f["agent"] == "terraform"]
     assert {"CKV_AWS_20", "CKV_AWS_24"} <= {f["rule_id"] for f in tf}
     assert all(f["file"].startswith("terraform/bad/") for f in tf)
+
+
+@needs_checkov
+def test_integration_includes_config_yaml_findings():
+    report = run_all(str(FIXTURES))
+    assert report["agents"]["config_yaml"]["status"] == "ok"
+    cy = [f for f in report["findings"] if f["agent"] == "config_yaml"]
+    assert {"CKV_K8S_16", "CKV_DOCKER_3", "CKV_GHA_2"} <= {f["rule_id"] for f in cy}
+    assert all(f["file"].startswith("config_yaml/bad/") for f in cy)
+    privileged = next(f for f in cy if f["rule_id"] == "CKV_K8S_16")
+    assert privileged["severity"] == "high"  # SEVERITY_RULES override
+
+
+def test_config_yaml_agent_is_registered_and_offline():
+    assert orchestrator.AGENTS["config_yaml"] is config_yaml_agent.scan_directory
+    assert "config_yaml" not in orchestrator.NETWORK_AGENTS
+
+
+def test_failed_config_yaml_agent_is_never_clean(tmp_path, monkeypatch, capsys):
+    _all_agents_return(monkeypatch, {})
+
+    def broken(path, exclude=()):
+        raise config_yaml_agent.ConfigYamlError(config_yaml_agent.INSTALL_HINT)
+
+    monkeypatch.setitem(orchestrator.AGENTS, "config_yaml", broken)
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["config_yaml"]["status"] == "failed"
+    assert "checkov is not installed" in report["agents"]["config_yaml"]["error"]
 
 
 def test_run_does_not_modify_files():
@@ -260,13 +295,15 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
 
     monkeypatch.setitem(orchestrator.AGENTS, "secrets", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "terraform", plain)
+    monkeypatch.setitem(orchestrator.AGENTS, "config_yaml", plain)
 
     report = run_all(str(tmp_path), offline=True)
     assert report["agents"]["dependencies"]["status"] == "failed"
     assert "offline mode" in report["agents"]["dependencies"]["error"]
     assert report["agents"]["secrets"]["status"] == "ok"
     assert report["agents"]["terraform"]["status"] == "ok"
-    assert len(calls) == 2
+    assert report["agents"]["config_yaml"]["status"] == "ok"
+    assert len(calls) == 3
 
 
 def test_cli_offline_flag(tmp_path, monkeypatch, capsys):

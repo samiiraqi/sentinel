@@ -14,6 +14,8 @@ is limited by SENTINEL_DEPS_TIME_BUDGET (default 300 seconds). For the
 backend we recommend SENTINEL_DEPS_TIME_BUDGET=120, so a page load never
 waits more than about two minutes for it; if it runs out, the agent shows
 as failed with the files it did not audit.
+
+The config_yaml agent (Kubernetes, Dockerfile, GitHub Actions via Checkov) runs offline.
 """
 
 import getpass

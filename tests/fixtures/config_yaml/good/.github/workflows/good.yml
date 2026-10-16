@@ -1,0 +1,12 @@
+# Hardened workflow: Checkov should report no failed checks.
+name: good
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "hello"
