@@ -1,7 +1,7 @@
 """Orchestrator: runs every agent on a folder and merges one report.
 
-READ-ONLY: it only calls each agent's scan_directory, which never changes
-files. It adds no scanning logic of its own. Findings already hold
+READ-ONLY: it only calls each agent's scan_directory (secrets, terraform,
+dependencies, config_yaml), which never changes files. It adds no scanning logic of its own. Findings already hold
 redacted values only; nothing raw is added here. If one agent fails, the
 others still run and the failure is recorded in the report.
 
@@ -21,6 +21,7 @@ import json
 import os
 import sys
 
+from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
 from agents.secrets import agent as secrets_agent
 from agents.terraform import agent as terraform_agent
@@ -31,6 +32,7 @@ AGENTS = {
     secrets_agent.AGENT_NAME: secrets_agent.scan_directory,
     terraform_agent.AGENT_NAME: terraform_agent.scan_directory,
     dependencies_agent.AGENT_NAME: dependencies_agent.scan_directory,
+    config_yaml_agent.AGENT_NAME: config_yaml_agent.scan_directory,
 }
 
 # Agents that contact the network. Only these get the `offline` flag.
@@ -51,6 +53,14 @@ SEVERITY_RULES = dict([
     ("CKV_AWS_20", "high"),  # public-read S3 bucket
     ("CKV_AWS_3", "medium"),  # unencrypted EBS volume
     ("CKV_AZURE_3", "medium"),  # storage account allows HTTP
+    # config_yaml agent (Checkov: Kubernetes, Dockerfile, GitHub Actions)
+    ("CKV_K8S_16", "high"),  # privileged container
+    ("CKV_K8S_2", "high"),  # admits privileged containers
+    ("CKV_K8S_19", "high"),  # shares the host network
+    ("CKV_K8S_4", "high"),  # admits host network
+    ("CKV_K8S_27", "high"),  # docker socket exposed to a container
+    ("CKV_GHA_2", "high"),  # shell injection in a workflow run step
+    ("CKV_GHA_3", "high"),  # curl with secrets in a workflow
 ])
 
 _RANK = {sev: i for i, sev in enumerate(reversed(SEVERITIES))}  # critical = 0
