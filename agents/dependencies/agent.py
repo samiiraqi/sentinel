@@ -49,6 +49,7 @@ import time
 from typing import Callable
 
 from shared.models import Finding
+from shared.paths import is_excluded
 
 AGENT_NAME = "dependencies"
 TIMEOUT_SECONDS = 300  # cap for a single tool run
@@ -577,7 +578,7 @@ def find_manifests(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[str],
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for name in sorted(files):
             rel = os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
-            if any(value in rel for value in exclude):
+            if is_excluded(rel, exclude):
                 continue
             if fnmatch.fnmatch(name, REQUIREMENTS_GLOB):
                 requirements.append(rel)
@@ -595,7 +596,8 @@ def scan_directory(
 ) -> list[Finding]:
     """Audit every requirements*.txt and package-lock.json under a folder.
 
-    Files whose path contains any value in `exclude` are skipped. A tool is
+    Files matching a value in `exclude` (by whole path components, see
+    shared.paths.is_excluded) are skipped. A tool is
     only needed if files for its ecosystem exist. If a needed tool is
     missing or fails, DependenciesError is raised: a scan that could not
     check never reports "no vulnerabilities". The whole scan is limited to
@@ -647,7 +649,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="TEXT",
-        help="skip files whose path contains TEXT (repeatable)",
+        help="skip files/folders named TEXT, or under path TEXT from FOLDER (repeatable)",
     )
     parser.add_argument(
         "--offline",
