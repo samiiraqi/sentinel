@@ -32,7 +32,15 @@ class Rule:
     message: str
     pattern: re.Pattern
     group: int = 0  # regex group that holds the secret value
+    # Captured values (compared lowercased, whole value only) that are never a secret.
+    ignore_values: frozenset[str] = frozenset()
 
+
+# Boolean/null literals, e.g. "automountServiceAccountToken: false" in a
+# Kubernetes manifest. Matched against the whole captured value (quotes are
+# outside the group), so "falsehood123" or "true_secret_key" are still found.
+# Trade-off: a password that is literally "true", "false" or "null" is missed.
+BOOLEAN_NULL_LITERALS = frozenset({"true", "false", "null"})
 
 RULES = [
     Rule(
@@ -62,6 +70,7 @@ RULES = [
             r"[\"']?\s*[:=]\s*[\"']?([^\s\"'#,;]{4,})"
         ),
         group=1,
+        ignore_values=BOOLEAN_NULL_LITERALS,
     ),
 ]
 
@@ -100,6 +109,8 @@ def scan_text(text: str, rel_path: str) -> list[Finding]:
     for line_no, line in enumerate(text.splitlines(), start=1):
         for rule in RULES:
             for match in rule.pattern.finditer(line):
+                if match.group(rule.group).lower() in rule.ignore_values:
+                    continue
                 # Redact first; the raw value is never stored.
                 findings.append(
                     Finding(
