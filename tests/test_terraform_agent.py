@@ -147,3 +147,78 @@ def test_exclude_does_not_drop_lookalike_files(tmp_path, monkeypatch):
 
     found = scan_directory(str(tmp_path), exclude=("main.tf", "tests/fixtures"))
     assert {f.file for f in found} == {"xmain.tf", "main.tf.bak", "other/tests/fixtures/a.tf"}
+
+
+# Offline: Checkov is faked, so these run without checkov installed.
+# What checkov 3.3.26 prints for a folder with no Terraform files.
+NO_TERRAFORM_SUMMARY = {
+    "passed": 0, "failed": 0, "skipped": 0, "parsing_errors": 0,
+    "resource_count": 0, "checkov_version": "3.3.26",
+}
+
+
+def _fake_checkov(monkeypatch, returncode=0, stdout="", installed=True, raises=None):
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        agent.importlib.util, "find_spec",
+        lambda name, *a: (object() if installed else None) if name == "checkov" else real_find_spec(name, *a),
+    )
+
+    def fake_run(cmd, **kw):
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+
+
+@pytest.mark.parametrize("stdout", ["", "  \n", None], ids=["empty", "whitespace", "none"])
+def test_empty_output_is_an_error_not_clean(tmp_path, monkeypatch, capsys, stdout):
+    _fake_checkov(monkeypatch, stdout=stdout)
+    with pytest.raises(agent.CheckovError, match="no output"):
+        scan_directory(str(tmp_path))
+    assert main([str(tmp_path)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: checkov returned no output" in captured.err
+
+
+def test_invalid_json_is_an_error(tmp_path, monkeypatch):
+    _fake_checkov(monkeypatch, stdout="not json {")
+    with pytest.raises(agent.CheckovError, match="could not parse"):
+        scan_directory(str(tmp_path))
+
+
+@pytest.mark.parametrize("stdout", ["null", "5", '"x"', "true"])
+def test_json_that_is_not_an_object_or_list_is_an_error(tmp_path, monkeypatch, stdout):
+    _fake_checkov(monkeypatch, stdout=stdout)
+    with pytest.raises(agent.CheckovError, match="unexpected"):
+        scan_directory(str(tmp_path))
+
+
+@pytest.mark.parametrize("returncode", [2, -9])
+def test_bad_exit_code_is_an_error(tmp_path, monkeypatch, returncode):
+    _fake_checkov(monkeypatch, returncode=returncode, stdout=json.dumps(SAMPLE))
+    with pytest.raises(agent.CheckovError, match=f"exit code {returncode}"):
+        scan_directory(str(tmp_path))
+
+
+def test_timeout_is_an_error(tmp_path, monkeypatch):
+    _fake_checkov(monkeypatch, raises=subprocess.TimeoutExpired("checkov", agent.TIMEOUT_SECONDS))
+    with pytest.raises(agent.CheckovError, match="timed out"):
+        scan_directory(str(tmp_path))
+
+
+def test_missing_checkov_is_an_error(tmp_path, monkeypatch, capsys):
+    _fake_checkov(monkeypatch, installed=False)
+    with pytest.raises(agent.CheckovError, match="not installed"):
+        scan_directory(str(tmp_path))
+    assert main([str(tmp_path)]) == 2
+    assert agent.INSTALL_HINT in capsys.readouterr().err
+
+
+def test_folder_without_terraform_is_clean(tmp_path, monkeypatch, capsys):
+    _fake_checkov(monkeypatch, stdout=json.dumps(NO_TERRAFORM_SUMMARY, indent=4))
+    assert scan_directory(str(tmp_path)) == []
+    assert main([str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out) == []
