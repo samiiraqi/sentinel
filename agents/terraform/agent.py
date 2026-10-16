@@ -5,6 +5,9 @@ READ-ONLY: Checkov only reads the folder. Terraform itself is never run
 key). Only the check id, name, file, line, and resource id are kept;
 Checkov's raw resource values are dropped so no secret can leak.
 
+NEVER LOOKS CLEAN BY ACCIDENT: a missing checkov, a bad exit code, empty
+or invalid output, or a timeout raises CheckovError.
+
 Usage: python -m agents.terraform.agent <folder> [--exclude TEXT ...]
 Exit code: 0 = no findings, 1 = findings, 2 = error.
 """
@@ -100,13 +103,16 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     # Checkov exits 0 (passed) or 1 (failed checks); anything else is an error.
     if proc.returncode not in (0, 1):
         raise CheckovError(f"checkov failed with exit code {proc.returncode}")
-    out = proc.stdout.strip()
+    out = (proc.stdout or "").strip()
     if not out:
-        return []
+        # Checkov always prints at least a summary, so empty output is an error.
+        raise CheckovError("checkov returned no output")
     try:
         data = json.loads(out)
     except json.JSONDecodeError as exc:
         raise CheckovError("could not parse checkov JSON output") from exc
+    if not isinstance(data, (dict, list)):
+        raise CheckovError("unexpected checkov JSON output")
 
     return [f for f in parse_checkov_output(data) if not is_excluded(f.file, exclude)]
 
