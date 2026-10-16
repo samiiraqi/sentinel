@@ -38,5 +38,6 @@ jobs:
           SENTINEL_REQUIRE_ALL_TESTS: "1"
         run: python -m pytest -q
 
+      # constraints-ci.txt lists package names and versions only; generic-secret-assignment false-positives on its pin of package "bc-detect-secrets" (1.5.52).
       - name: Scan repo for secrets
-        run: python -m agents.secrets.agent . --exclude tests/fixtures --exclude .venv --exclude constraints-ci.txt
+        run: python -m agents.secrets.agent . --exclude tests/fixtures --exclude .venv --exclude-file constraints-ci.txt
