@@ -23,6 +23,7 @@ import sys
 
 from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
+from agents.sast import agent as sast_agent
 from agents.secrets import agent as secrets_agent
 from agents.terraform import agent as terraform_agent
 from shared.models import SEVERITIES, Finding
@@ -33,6 +34,7 @@ AGENTS = {
     terraform_agent.AGENT_NAME: terraform_agent.scan_directory,
     dependencies_agent.AGENT_NAME: dependencies_agent.scan_directory,
     config_yaml_agent.AGENT_NAME: config_yaml_agent.scan_directory,
+    sast_agent.AGENT_NAME: sast_agent.scan_directory,
 }
 
 # Agents that contact the network. Only these get the `offline` flag.
@@ -61,6 +63,12 @@ SEVERITY_RULES = dict([
     ("CKV_K8S_27", "high"),  # docker socket exposed to a container
     ("CKV_GHA_2", "high"),  # shell injection in a workflow run step
     ("CKV_GHA_3", "high"),  # curl with secrets in a workflow
+    # sast agent (Bandit, Python)
+    ("B602", "high"),  # subprocess call with shell=True
+    ("B605", "high"),  # process started with a shell (e.g. os.system)
+    ("B307", "high"),  # eval
+    ("B301", "high"),  # pickle loads untrusted data
+    ("B506", "high"),  # yaml.load without a safe loader
 ])
 
 _RANK = {sev: i for i, sev in enumerate(reversed(SEVERITIES))}  # critical = 0
