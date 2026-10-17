@@ -11,7 +11,7 @@
 - [ ] Availability agent
 - [ ] WAF agent (checks WAF config in AWS/Azure code)
 - [ ] CloudFront agent (checks CloudFront config)
-- [ ] SAST agent (static source code scan)
+- [x] SAST agent (Bandit: Python only; TypeScript not covered yet)
 - [ ] DAST agent (scans a running app; needs a design decision because it sends requests, which conflicts with the read-only rule)
 
 ## Approval

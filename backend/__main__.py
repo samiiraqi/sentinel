@@ -6,6 +6,7 @@ Scan folder: SENTINEL_SCAN_PATH (default "."). Audit log: SENTINEL_AUDIT_LOG
 does not contact online vulnerability databases (it shows as failed).
 SENTINEL_DEPS_TIME_BUDGET: time limit in seconds for the dependencies scan
 (default 300); recommended for the backend: SENTINEL_DEPS_TIME_BUDGET=120.
+The sast agent (Python only, via Bandit) runs offline.
 """
 
 import uvicorn

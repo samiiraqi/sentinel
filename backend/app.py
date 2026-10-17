@@ -16,6 +16,7 @@ waits more than about two minutes for it; if it runs out, the agent shows
 as failed with the files it did not audit.
 
 The config_yaml agent (Kubernetes, Dockerfile, GitHub Actions via Checkov) runs offline.
+The sast agent (Python only, via Bandit) runs offline.
 """
 
 import getpass

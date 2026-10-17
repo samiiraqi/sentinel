@@ -1,7 +1,7 @@
 """Orchestrator: runs every agent on a folder and merges one report.
 
 READ-ONLY: it only calls each agent's scan_directory (secrets, terraform,
-dependencies, config_yaml), which never changes files. It adds no scanning logic of its own. Findings already hold
+dependencies, config_yaml, sast), which never changes files. It adds no scanning logic of its own. Findings already hold
 redacted values only; nothing raw is added here. If one agent fails, the
 others still run and the failure is recorded in the report.
 
