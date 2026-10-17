@@ -7,6 +7,7 @@ import pytest
 
 from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
+from agents.sast import agent as sast_agent
 from orchestrator import orchestrator
 from orchestrator.orchestrator import apply_severity, main, run_all, sort_findings
 from shared.models import Finding
@@ -16,6 +17,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 needs_checkov = pytest.mark.skipif(
     importlib.util.find_spec("checkov") is None,
     reason="checkov not installed (pip install -r requirements-terraform.txt)",
+)
+needs_bandit = pytest.mark.skipif(
+    importlib.util.find_spec("bandit") is None,
+    reason="bandit not installed (pip install -r requirements-sast.txt)",
 )
 
 # FAKE values from the fixtures, split so this file does not trip the
@@ -66,6 +71,13 @@ def _snapshot(root: Path) -> dict:
         ("CKV_K8S_27", "medium", "high"),
         ("CKV_GHA_2", "medium", "high"),
         ("config-unscanned", "low", "low"),
+        ("B602", "high", "high"),
+        ("B605", "low", "high"),
+        ("B307", "medium", "high"),
+        ("B301", "medium", "high"),
+        ("B506", "medium", "high"),
+        ("B101", "low", "low"),
+        ("sast-unscanned", "low", "low"),
         ("CKV_UNKNOWN_1", "low", "low"),
         ("some-other-rule", "critical", "critical"),
     ],
@@ -187,6 +199,44 @@ def test_failed_config_yaml_agent_is_never_clean(tmp_path, monkeypatch, capsys):
     assert "checkov is not installed" in report["agents"]["config_yaml"]["error"]
 
 
+def test_sast_agent_is_registered_and_offline():
+    assert orchestrator.AGENTS["sast"] is sast_agent.scan_directory
+    assert "sast" not in orchestrator.NETWORK_AGENTS
+
+
+def test_failed_sast_agent_is_never_clean(tmp_path, monkeypatch, capsys):
+    _all_agents_return(monkeypatch, {})
+
+    def broken(path, exclude=()):
+        raise sast_agent.SastError(sast_agent.INSTALL_HINT)
+
+    monkeypatch.setitem(orchestrator.AGENTS, "sast", broken)
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["sast"]["status"] == "failed"
+    assert "bandit is not installed" in report["agents"]["sast"]["error"]
+
+
+@needs_bandit
+def test_integration_includes_sast_findings_without_raw_values(capsys):
+    report = run_all(str(FIXTURES))
+    assert report["agents"]["sast"]["status"] == "ok"
+    sast = [f for f in report["findings"] if f["agent"] == "sast"]
+    # tests/fixtures/settings.py holds a FAKE hard-coded password.
+    assert ("B105", "settings.py") in {(f["rule_id"], f["file"]) for f in sast}
+    out = json.dumps(report)
+    for secret in FAKE_SECRETS:
+        assert secret not in out
+
+
+@needs_bandit
+def test_real_sast_severity_override(tmp_path):
+    (tmp_path / "run.py").write_text("import os\n\n\ndef run(cmd):\n    os.system(cmd)\n")
+    report = run_all(str(tmp_path))
+    by_rule = {f["rule_id"]: f for f in report["findings"] if f["agent"] == "sast"}
+    assert by_rule["B605"]["severity"] == "high"
+
+
 def test_run_does_not_modify_files():
     before = _snapshot(FIXTURES)
     run_all(str(FIXTURES))
@@ -296,6 +346,7 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     monkeypatch.setitem(orchestrator.AGENTS, "secrets", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "terraform", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "config_yaml", plain)
+    monkeypatch.setitem(orchestrator.AGENTS, "sast", plain)
 
     report = run_all(str(tmp_path), offline=True)
     assert report["agents"]["dependencies"]["status"] == "failed"
@@ -303,7 +354,8 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     assert report["agents"]["secrets"]["status"] == "ok"
     assert report["agents"]["terraform"]["status"] == "ok"
     assert report["agents"]["config_yaml"]["status"] == "ok"
-    assert len(calls) == 3
+    assert report["agents"]["sast"]["status"] == "ok"
+    assert len(calls) == 4
 
 
 def test_cli_offline_flag(tmp_path, monkeypatch, capsys):

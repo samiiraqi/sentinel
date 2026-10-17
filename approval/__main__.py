@@ -6,6 +6,7 @@ Usage: python -m approval <folder> [--exclude TEXT ...] [--log audit/decisions.j
 databases (it is reported as failed).
 
 The config_yaml agent (Kubernetes, Dockerfile, GitHub Actions via Checkov) runs offline.
+The sast agent (Python only, via Bandit) runs offline.
 """
 
 import argparse
