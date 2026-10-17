@@ -4,6 +4,8 @@
 
 Sentinel is a read-only security scanner for a code folder. Specialist agents look for hard-coded secrets, insecure Terraform, insecure Kubernetes / Dockerfile / GitHub Actions config, and known-vulnerable packages. A person reviews every finding, and every decision is written to an append-only audit log.
 
+https://github.com/user-attachments/assets/b4bb6e6d-b91c-486f-be12-415355df60f8
+
 ## What it does
 
 - **Finds problems.** Four agents scan a folder and an orchestrator merges their results into one report.
