@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -222,3 +223,134 @@ def test_folder_without_terraform_is_clean(tmp_path, monkeypatch, capsys):
     assert scan_directory(str(tmp_path)) == []
     assert main([str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+# Unparsed .tf files: Checkov lists them (absolute paths) under
+# results.parsing_errors and counts them in summary.parsing_errors.
+ROOT = "/scan/root"
+
+
+def _parse_errors_output(paths, count=None, failed=()):
+    return {
+        "check_type": "terraform",
+        "results": {"failed_checks": list(failed), "parsing_errors": list(paths)},
+        "summary": {"parsing_errors": len(paths) if count is None else count},
+    }
+
+
+def test_parse_errors_become_unscanned_findings():
+    data = _parse_errors_output([ROOT + "/main.tf", ROOT + "/sub/bad.tf", ROOT + "/main.tf"], count=2)
+    data["results"]["failed_checks"] = SAMPLE["results"]["failed_checks"]
+    # Without --quiet Checkov adds this hint; it is only text and is never read.
+    data["url"] = "Add an api key '--bc-api-key <api-key>' to see more detailed insights via https://bridgecrew.cloud"
+    data["error_text"] = "FAKE-VALUE"  # anything but the paths must never reach a Finding
+    findings = parse_checkov_output(data, ROOT)
+    unscanned = [f.to_dict() for f in findings if f.rule_id == "terraform-unscanned"]
+    assert unscanned == [
+        {
+            "agent": "terraform",
+            "rule_id": "terraform-unscanned",
+            "severity": "low",
+            "file": file,
+            "line": 0,
+            "message": "not scanned: Checkov could not parse this file",
+            "redacted_match": "",
+        }
+        for file in ("main.tf", "sub/bad.tf")
+    ]
+    assert len(findings) == 4  # 2 failed checks + 2 unscanned files
+    dumped = json.dumps([f.to_dict() for f in findings])
+    assert "FAKE-VALUE" not in dumped and "bridgecrew" not in dumped
+
+
+@pytest.mark.parametrize(
+    "paths, count, named",
+    [
+        ([], 2, []),  # count only, no names (what --quiet gives)
+        ([ROOT + "/main.tf"], 2, ["main.tf"]),  # fewer names than the count
+        (["/elsewhere/main.tf", ROOT + "/../main.tf", "", 5], 4, []),  # outside root or not a path
+    ],
+    ids=["no-names", "some-names", "outside-root"],
+)
+def test_parse_errors_without_names_are_never_clean(paths, count, named):
+    findings = parse_checkov_output(_parse_errors_output(paths, count), ROOT)
+    assert all(f.rule_id == "terraform-unscanned" and f.severity == "low" for f in findings)
+    assert [f.file for f in findings] == named + [""]
+    missing = count - len(named)
+    assert findings[-1].message == (
+        f"not scanned: Checkov could not parse {missing} file(s) and gave no file name inside the scanned folder"
+    )
+    assert "elsewhere" not in json.dumps([f.to_dict() for f in findings])
+
+
+@pytest.mark.parametrize("count", ["2", None, True, -1, 1.5])
+def test_bad_parse_error_count_is_an_error(count):
+    with pytest.raises(agent.CheckovError, match="parsing_errors count"):
+        parse_checkov_output({"results": {}, "summary": {"parsing_errors": count}}, ROOT)
+
+
+def test_parse_errors_that_are_not_a_list_are_an_error():
+    with pytest.raises(agent.CheckovError, match="parsing_errors list"):
+        parse_checkov_output({"results": {"parsing_errors": ROOT + "/main.tf"}}, ROOT)
+
+
+def test_command_does_not_use_quiet(tmp_path, monkeypatch):
+    # --quiet drops results.parsing_errors, so the file names would be lost.
+    seen = []
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(agent.importlib.util, "find_spec",
+                        lambda name, *a: object() if name == "checkov" else real_find_spec(name, *a))
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(NO_TERRAFORM_SUMMARY), "")
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    scan_directory(str(tmp_path))
+    assert "--quiet" not in seen[0]
+    assert "--skip-download" in seen[0]
+
+
+def test_only_unparsed_files_exit_1_not_clean(tmp_path, monkeypatch, capsys):
+    root = os.path.abspath(tmp_path)
+    _fake_checkov(monkeypatch, stdout=json.dumps(_parse_errors_output([root + "/main.tf"])))
+    assert main([str(tmp_path)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert [(f["rule_id"], f["file"]) for f in out] == [("terraform-unscanned", "main.tf")]
+
+
+def test_exclude_hides_named_unscanned_but_not_unnamed(tmp_path, monkeypatch):
+    root = os.path.abspath(tmp_path)
+    output = _parse_errors_output([root + "/main.tf", root + "/infra/a.tf"], count=3)
+    _fake_checkov(monkeypatch, stdout=json.dumps(output))
+    found = scan_directory(str(tmp_path), exclude=("main.tf",))
+    assert [f.file for f in found] == ["infra/a.tf", ""]
+
+
+# Real Checkov: the broken .tf is written to tmp_path at test time, never
+# committed under tests/fixtures (the orchestrator and backend tests scan
+# that whole folder).
+BROKEN_TF = 'resource "aws_s3_bucket" "broken" {\n  bucket = "sentinel-test"\n'
+
+
+@needs_checkov
+def test_real_checkov_reports_only_broken_file_as_unscanned(tmp_path, capsys):
+    (tmp_path / "main.tf").write_text(BROKEN_TF)
+    assert main([str(tmp_path)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert [(f["rule_id"], f["file"], f["severity"]) for f in out] == [("terraform-unscanned", "main.tf", "low")]
+    assert "sentinel-test" not in json.dumps(out)
+
+
+@needs_checkov
+def test_real_checkov_mixed_folder_flags_just_the_broken_file(tmp_path):
+    (tmp_path / "good.tf").write_text((GOOD / "main.tf").read_text())
+    (tmp_path / "broken.tf").write_text(BROKEN_TF)
+    findings = scan_directory(str(tmp_path))
+    assert [(f.rule_id, f.file) for f in findings] == [("terraform-unscanned", "broken.tf")]
+
+
+@needs_checkov
+def test_real_checkov_fixtures_have_no_unscanned_files():
+    for folder in (BAD, GOOD):
+        assert not [f for f in scan_directory(str(folder)) if f.rule_id == "terraform-unscanned"]

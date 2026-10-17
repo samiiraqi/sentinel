@@ -6,7 +6,9 @@ key). Only the check id, name, file, line, and resource id are kept;
 Checkov's raw resource values are dropped so no secret can leak.
 
 NEVER LOOKS CLEAN BY ACCIDENT: a missing checkov, a bad exit code, empty
-or invalid output, or a timeout raises CheckovError.
+or invalid output, or a timeout raises CheckovError. Checkov skips .tf
+files it cannot parse, so each one becomes a low "terraform-unscanned"
+finding (and one more if Checkov counts parse errors it gives no name for).
 
 Usage: python -m agents.terraform.agent <folder> [--exclude TEXT ...]
 Exit code: 0 = no findings, 1 = findings, 2 = error.
@@ -24,6 +26,8 @@ from shared.paths import is_excluded
 
 AGENT_NAME = "terraform"
 DEFAULT_SEVERITY = "medium"
+UNSCANNED_RULE = "terraform-unscanned"
+UNSCANNED_SEVERITY = "low"
 TIMEOUT_SECONDS = 300
 INSTALL_HINT = "checkov is not installed. Run: pip install -r requirements-terraform.txt"
 
@@ -46,14 +50,51 @@ def _first_line(line_range) -> int:
     return 0
 
 
-def parse_checkov_output(data: dict | list) -> list[Finding]:
-    """Turn Checkov JSON (one report or a list of reports) into Findings."""
+def _unscanned(rel_path: str, reason: str) -> Finding:
+    return Finding(
+        agent=AGENT_NAME,
+        rule_id=UNSCANNED_RULE,
+        severity=UNSCANNED_SEVERITY,
+        file=rel_path,
+        line=0,
+        message=f"not scanned: {reason}",
+        redacted_match="",
+    )
+
+
+def _relative(path: str, root: str) -> str | None:
+    """Path relative to root with "/" separators, or None if it is not inside root."""
+    try:
+        rel = os.path.relpath(os.path.join(root, path), root).replace(os.sep, "/")
+    except ValueError:  # Windows: another drive
+        return None
+    if rel in (".", "..") or rel.startswith("../"):
+        return None
+    return rel
+
+
+def _parse_error_count(report: dict) -> int:
+    count = (report.get("summary") or {}).get("parsing_errors", 0)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise CheckovError("unexpected checkov parsing_errors count")
+    return count
+
+
+def parse_checkov_output(data: dict | list, root: str = "/") -> list[Finding]:
+    """Turn Checkov JSON (one report or a list of reports) into Findings.
+
+    Files Checkov lists under results.parsing_errors (absolute paths) become
+    terraform-unscanned findings, relative to root. If summary.parsing_errors
+    counts more files than were named inside root, one extra finding with an
+    empty file says so, so a scan with parse errors never looks clean.
+    """
     reports = data if isinstance(data, list) else [data]
     findings = []
     for report in reports:
         if not isinstance(report, dict):
             continue
-        for check in (report.get("results") or {}).get("failed_checks") or []:
+        results = report.get("results") or {}
+        for check in results.get("failed_checks") or []:
             # Only safe fields are copied; check_result/code_block are ignored.
             findings.append(
                 Finding(
@@ -65,6 +106,22 @@ def parse_checkov_output(data: dict | list) -> list[Finding]:
                     message=str(check.get("check_name", "")),
                     redacted_match=str(check.get("resource", "")),
                 )
+            )
+
+        errors = results.get("parsing_errors") or []
+        if not isinstance(errors, list):
+            raise CheckovError("unexpected checkov parsing_errors list")
+        named = []
+        for path in errors:
+            rel = _relative(path, root) if isinstance(path, str) and path else None
+            if rel is not None and rel not in named:
+                named.append(rel)
+        # Only the path is kept; Checkov's error text is never copied.
+        findings.extend(_unscanned(rel, "Checkov could not parse this file") for rel in named)
+        missing = _parse_error_count(report) - len(named)
+        if missing > 0:
+            findings.append(
+                _unscanned("", f"Checkov could not parse {missing} file(s) and gave no file name inside the scanned folder")
             )
     return findings
 
@@ -87,7 +144,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
         "-d", root,
         "--framework", "terraform",
         "-o", "json",
-        "--quiet",
+        # No --quiet: with it, Checkov drops results.parsing_errors (the file names).
         "--compact",
         "--skip-download",
     ]
@@ -114,7 +171,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     if not isinstance(data, (dict, list)):
         raise CheckovError("unexpected checkov JSON output")
 
-    return [f for f in parse_checkov_output(data) if not is_excluded(f.file, exclude)]
+    return [f for f in parse_checkov_output(data, root) if not is_excluded(f.file, exclude)]
 
 
 def main(argv: list[str] | None = None) -> int:
