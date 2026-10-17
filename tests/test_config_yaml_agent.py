@@ -256,7 +256,8 @@ def test_workflow_without_checkov_result_is_unscanned(tmp_path, fake):
 @needs_yaml
 def test_checkov_parse_error_and_own_check_are_not_duplicated(tmp_path, fake):
     (tmp_path / "broken.yaml").write_text("a: [\n")
-    fake(stdout={"check_type": "kubernetes", "results": {"parsing_errors": ["/broken.yaml"]}})
+    # Checkov lists parsing_errors as absolute paths.
+    fake(stdout={"check_type": "kubernetes", "results": {"parsing_errors": [str(tmp_path / "broken.yaml")]}})
     assert [f.file for f in scan_directory(str(tmp_path))] == ["broken.yaml"]
 
 
@@ -282,6 +283,65 @@ def test_exclude_uses_component_matching(tmp_path, fake):
     fake(stdout=output)
     found = scan_directory(str(tmp_path), exclude=("k8s", "tests/fixtures"))
     assert {f.file for f in found} == {"k8s-old/a.yaml", "other/tests/fixtures/a.yaml"}
+
+
+# ---------------------------------------------------------------- parsing_errors paths
+# Checkov lists parsing_errors as absolute paths; they must become relative
+# to the scanned folder, and a path outside it must never be shown.
+ROOT = "/scan/root"
+OUTSIDE_MESSAGE = "not scanned: Checkov could not parse a file outside the scanned folder"
+
+
+def _parse_errors(*paths, check_type="kubernetes"):
+    return {"check_type": check_type, "results": {"parsing_errors": list(paths)}}
+
+
+def test_absolute_parse_error_paths_become_relative():
+    findings = parse_checkov_output(_parse_errors(ROOT + "/k8s/broken.yaml", ROOT + "/a/b/c.yml"), ROOT)
+    assert [(f.rule_id, f.severity, f.file, f.line) for f in findings] == [
+        ("config-unscanned", "low", "k8s/broken.yaml", 0),
+        ("config-unscanned", "low", "a/b/c.yml", 0),
+    ]
+    assert all(f.message == "not scanned: Checkov could not parse this file" for f in findings)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/elsewhere/deploy.yaml", ROOT + "/../deploy.yaml", ROOT, "", 5, None],
+    ids=["other-folder", "dot-dot", "root-itself", "empty", "int", "none"],
+)
+def test_parse_error_outside_root_is_one_unnamed_finding(path):
+    findings = parse_checkov_output(_parse_errors(path), ROOT)
+    assert [(f.rule_id, f.severity, f.file, f.message) for f in findings] == [
+        ("config-unscanned", "low", "", OUTSIDE_MESSAGE),
+    ]
+    assert "elsewhere" not in json.dumps([f.to_dict() for f in findings])
+
+
+def test_many_outside_paths_across_reports_give_one_unnamed_finding():
+    data = [
+        _parse_errors("/elsewhere/a.yaml", ROOT + "/k8s/in.yaml"),
+        _parse_errors("/elsewhere/b.yml", "", check_type="github_actions"),
+    ]
+    assert [f.file for f in parse_checkov_output(data, ROOT)] == ["k8s/in.yaml", ""]
+
+
+@needs_yaml
+def test_nested_absolute_parse_error_is_relative_and_not_duplicated(tmp_path, fake):
+    nested = tmp_path / "k8s" / "apps" / "broken.yaml"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("a: [\n")
+    fake(stdout=_parse_errors(str(nested)))
+    found = scan_directory(str(tmp_path))
+    assert [(f.rule_id, f.file) for f in found] == [("config-unscanned", "k8s/apps/broken.yaml")]
+
+
+@needs_yaml
+def test_exclude_hides_named_parse_error_but_not_outside_one(tmp_path, fake):
+    fake(stdout=_parse_errors(str(tmp_path / "k8s" / "a.yaml"), "/elsewhere/b.yaml"))
+    assert [f.file for f in scan_directory(str(tmp_path))] == ["k8s/a.yaml", ""]
+    found = scan_directory(str(tmp_path), exclude=("k8s", "elsewhere", "b.yaml"))
+    assert [(f.file, f.message) for f in found] == [("", OUTSIDE_MESSAGE)]
 
 
 # ---------------------------------------------------------------- real checkov
@@ -320,3 +380,26 @@ def test_scan_does_not_modify_files():
     scan_directory(str(BAD))
     scan_directory(str(GOOD))
     assert _snapshot(FIXTURES) == before
+
+
+
+@needs_checkov
+def test_real_checkov_paths_are_relative_to_scanned_folder(tmp_path):
+    # Broken file written at test time; nothing broken is committed.
+    deploy = tmp_path / "k8s" / "apps" / "web" / "deployment.yaml"
+    dockerfile = tmp_path / "docker" / "api" / "Dockerfile"
+    broken = tmp_path / "configs" / "broken" / "bad.yaml"
+    for target, source in ((deploy, BAD / "k8s" / "deployment.yaml"), (dockerfile, BAD / "Dockerfile")):
+        target.parent.mkdir(parents=True)
+        target.write_text(source.read_text())
+    broken.parent.mkdir(parents=True)
+    broken.write_text("apiVersion: v1\nkind: Pod\nspec: [\n")
+
+    found = scan_directory(str(tmp_path))
+    files = {f.file for f in found}
+    assert files == {"k8s/apps/web/deployment.yaml", "docker/api/Dockerfile", "configs/broken/bad.yaml"}
+    for f in found:
+        assert not f.file.startswith("/") and tmp_path.name not in f.file
+        assert (tmp_path / f.file).is_file()
+    assert [f.file for f in found if f.rule_id == "config-unscanned"] == ["configs/broken/bad.yaml"]
+    assert "CKV_K8S_16" in {f.rule_id for f in found if f.file == "k8s/apps/web/deployment.yaml"}

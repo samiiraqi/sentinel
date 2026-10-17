@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 from shared.models import SEVERITIES, Finding
-from shared.paths import is_excluded
+from shared.paths import is_excluded, relative_to_root
 
 AGENT_NAME = "config_yaml"
 FRAMEWORKS = ("kubernetes", "dockerfile", "github_actions")
@@ -76,12 +76,16 @@ def _reports(data) -> list[dict]:
     return [r for r in reports if isinstance(r, dict)]
 
 
-def parse_checkov_output(data: dict | list) -> list[Finding]:
+def parse_checkov_output(data: dict | list, root: str = "/") -> list[Finding]:
     """Turn Checkov JSON (one report or a list of reports) into Findings.
 
-    Files Checkov lists under results.parsing_errors become config-unscanned.
+    Files Checkov lists under results.parsing_errors (absolute paths) become
+    config-unscanned, relative to root. Any path outside root (or empty, or
+    not text) becomes one config-unscanned finding with an empty file; the
+    outside path is never shown.
     """
     findings = []
+    outside = False
     for report in _reports(data):
         results = report.get("results") or {}
         for check in results.get("failed_checks") or []:
@@ -98,7 +102,13 @@ def parse_checkov_output(data: dict | list) -> list[Finding]:
                 )
             )
         for path in results.get("parsing_errors") or []:
-            findings.append(_unscanned(str(path).lstrip("/"), "Checkov could not parse this file"))
+            rel = relative_to_root(path, root) if isinstance(path, str) and path else None
+            if rel is None:
+                outside = True
+            else:
+                findings.append(_unscanned(rel, "Checkov could not parse this file"))
+    if outside:
+        findings.append(_unscanned("", "Checkov could not parse a file outside the scanned folder"))
     return findings
 
 
@@ -253,7 +263,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     exclude = tuple(v for v in exclude if v)
 
     data = run_checkov(root)
-    findings = parse_checkov_output(data)
+    findings = parse_checkov_output(data, root)
 
     unscanned, workflows = check_yaml_files(root, exclude)
     reported = {f.file for f in findings}
