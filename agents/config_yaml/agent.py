@@ -8,8 +8,9 @@ check id, name, file, line, and resource id are kept; Checkov's raw values
 
 NEVER LOOKS CLEAN BY ACCIDENT: a missing checkov, a bad exit code, empty
 or invalid output, or a timeout raises ConfigYamlError. Checkov silently
-skips invalid YAML and workflows it cannot read, so this agent also checks
-coverage itself: such files become low "config-unscanned" findings.
+skips invalid YAML, workflows and Dockerfiles it cannot read (e.g. binary
+or non-UTF-8), so this agent also checks coverage itself: such files become
+low "config-unscanned" findings.
 
 Usage: python -m agents.config_yaml.agent <folder> [--exclude TEXT ...]
 Exit code: 0 = no findings, 1 = findings, 2 = error.
@@ -38,6 +39,13 @@ YAML_SUFFIXES = (".yml", ".yaml")
 # Folders never walked for the coverage check (Checkov skips these too, or they hold no config of ours).
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".terraform", ".serverless"}
 SECRET_ENV = ("BC_API_KEY", "PRISMA_API_URL")
+# Checkov's own walk rules (checkov.common.runners.base_runner): it skips every
+# folder or file whose name starts with "." and these names. The Dockerfile
+# coverage walk copies them, and the settings that change them are removed
+# from Checkov's environment so both stay the same.
+CHECKOV_IGNORED_NAMES = {"node_modules", ".terraform", ".serverless"}
+CHECKOV_WALK_ENV = ("CKV_IGNORED_DIRECTORIES", "CKV_IGNORE_HIDDEN_DIRECTORIES")
+NO_DOCKERFILE_RESULT = "Checkov returned no result for this Dockerfile"
 INSTALL_HINT = "checkov is not installed. Run: pip install -r requirements-terraform.txt"
 
 
@@ -112,14 +120,16 @@ def parse_checkov_output(data: dict | list, root: str = "/") -> list[Finding]:
     return findings
 
 
-def scanned_files(data: dict | list, check_type: str) -> set[str]:
+def scanned_files(
+    data: dict | list, check_type: str, keys: tuple[str, ...] = ("passed_checks", "failed_checks")
+) -> set[str]:
     """Relative paths Checkov reported any passed or failed check for, in one framework."""
     files = set()
     for report in _reports(data):
         if report.get("check_type") != check_type:
             continue
         results = report.get("results") or {}
-        for key in ("passed_checks", "failed_checks"):
+        for key in keys:
             for check in results.get(key) or []:
                 files.add(str(check.get("file_path", "")).lstrip("/"))
     return files
@@ -181,6 +191,63 @@ def check_yaml_files(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[Fin
     return unscanned, workflows
 
 
+def _checkov_skips(name: str) -> bool:
+    return name.startswith(".") or name in CHECKOV_IGNORED_NAMES
+
+
+def find_dockerfiles(root: str, exclude: tuple[str, ...] = ()) -> list[str]:
+    """Relative paths of every file Checkov's Dockerfile runner scans under root.
+
+    Uses Checkov's own is_dockerfile name rule and copies its walk rules
+    (see CHECKOV_IGNORED_NAMES; folder symlinks are not followed).
+    """
+    try:
+        from checkov.common.util.dockerfile import is_dockerfile
+    except ImportError as exc:
+        raise ConfigYamlError("cannot check Dockerfile coverage: checkov's is_dockerfile could not be imported") from exc
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if not _checkov_skips(d)
+            and not is_excluded(os.path.relpath(os.path.join(dirpath, d), root), exclude)
+        )
+        for name in sorted(filenames):
+            if _checkov_skips(name) or not is_dockerfile(name):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+            if not is_excluded(rel, exclude):
+                found.append(rel)
+    return found
+
+
+def check_unscanned_dockerfile(root: str, rel_path: str) -> Finding | None:
+    """Read-only check of a Dockerfile Checkov returned no result for.
+
+    Empty or whitespace-only files have nothing to scan: None. A symlink is
+    never read, and neither is a file over MAX_FILE_BYTES.
+    """
+    full = os.path.join(root, rel_path)
+    if os.path.islink(full):
+        return _unscanned(rel_path, NO_DOCKERFILE_RESULT)
+    try:
+        if os.path.getsize(full) > MAX_FILE_BYTES:
+            return _unscanned(rel_path, NO_DOCKERFILE_RESULT)
+        with open(full, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return _unscanned(rel_path, "file could not be read")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return _unscanned(rel_path, "file could not be read as UTF-8 text (Checkov skips it silently)")
+    if not text.strip():
+        return None
+    return _unscanned(rel_path, NO_DOCKERFILE_RESULT)
+
+
 def _run_tool(cmd: list[str], timeout: float, cwd: str, env: dict) -> subprocess.CompletedProcess:
     """Run a tool in its own process group. On a timeout (or any other error,
     e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
@@ -226,8 +293,9 @@ def run_checkov(root: str) -> dict | list:
         "--compact",
         "--skip-download",
     ]
-    # Never pass an API key to Checkov, even if one is set in the environment.
-    env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
+    # Never pass an API key to Checkov, even if one is set in the environment,
+    # nor settings that would change which files it walks (see CHECKOV_WALK_ENV).
+    env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV + CHECKOV_WALK_ENV}
     try:
         proc = _run_tool(cmd, TIMEOUT_SECONDS, cwd=root, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -274,6 +342,13 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
         for rel in workflows
         if rel not in seen
     )
+    # Inline-suppressed checks still mean Checkov read the Dockerfile.
+    covered = scanned_files(data, "dockerfile", ("passed_checks", "failed_checks", "skipped_checks"))
+    for rel in find_dockerfiles(root, exclude):
+        if rel not in covered:
+            finding = check_unscanned_dockerfile(root, rel)
+            if finding is not None:
+                findings.append(finding)
     return [f for f in findings if not is_excluded(f.file, exclude)]
 
 

@@ -11,6 +11,7 @@ from agents.config_yaml import agent
 from agents.config_yaml.agent import (
     ConfigYamlError,
     check_yaml_files,
+    find_dockerfiles,
     main,
     parse_checkov_output,
     scan_directory,
@@ -403,3 +404,167 @@ def test_real_checkov_paths_are_relative_to_scanned_folder(tmp_path):
         assert (tmp_path / f.file).is_file()
     assert [f.file for f in found if f.rule_id == "config-unscanned"] == ["configs/broken/bad.yaml"]
     assert "CKV_K8S_16" in {f.rule_id for f in found if f.file == "k8s/apps/web/deployment.yaml"}
+
+
+# ---------------------------------------------------------------- Dockerfile coverage
+# Checkov silently skips Dockerfiles it cannot read (binary, non-UTF-8).
+# Every such file is written to tmp_path at test time; none is committed.
+VALID_DOCKERFILE = "FROM alpine:3.19\nUSER app\n"
+BINARY = bytes(range(256))  # not valid UTF-8
+NON_UTF8 = b"FROM alpine:3.19\n# SECRET-MARKER caf\xe9\nUSER app\n"
+UTF8_MESSAGE = "not scanned: file could not be read as UTF-8 text (Checkov skips it silently)"
+NO_RESULT_MESSAGE = "not scanned: Checkov returned no result for this Dockerfile"
+
+# File names (and folders) Checkov 3.3.x scans as Dockerfiles, and ones it does not.
+CHECKOV_SCANS = [
+    "Dockerfile", "Dockerfile.prod", "api.Dockerfile", "dockerfile", "prod.dockerfile.bak",
+    "sub/Dockerfile", "venv/Dockerfile", "__pycache__/Dockerfile",
+]
+CHECKOV_IGNORES = [
+    "Containerfile", "DOCKERFILE", "Dockerfile-dev", "Dockerfile.dockerignore", ".Dockerfile",
+    ".x.Dockerfile", ".hidden/Dockerfile", ".venv/Dockerfile", "node_modules/Dockerfile",
+    "a/node_modules/b/Dockerfile", ".terraform/Dockerfile", ".serverless/Dockerfile",
+]
+
+
+def _write(root: Path, rel: str, content: str | bytes) -> Path:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
+    return path
+
+
+def _docker_output(passed=(), skipped=()):
+    return {"check_type": "dockerfile", "results": {
+        "passed_checks": [{"check_id": "CKV_DOCKER_1", "file_path": "/" + f} for f in passed],
+        "skipped_checks": [{"check_id": "CKV_DOCKER_2", "file_path": "/" + f} for f in skipped],
+    }}
+
+
+def _no_reads(*args, **kwargs):
+    raise AssertionError("file content must not be read")
+
+
+@needs_checkov
+def test_dockerfile_without_checkov_result_is_unscanned(tmp_path, fake):
+    _write(tmp_path, "covered/Dockerfile", VALID_DOCKERFILE)
+    _write(tmp_path, "suppressed/Dockerfile", VALID_DOCKERFILE)
+    _write(tmp_path, "text/Dockerfile", VALID_DOCKERFILE)
+    _write(tmp_path, "nonutf8/Dockerfile", NON_UTF8)
+    _write(tmp_path, "binary/Dockerfile", BINARY)
+    _write(tmp_path, "empty/Dockerfile", "")
+    _write(tmp_path, "blank/Dockerfile", "\n   \n\t\n")
+    _write(tmp_path, "bom-only/Dockerfile", b"\xef\xbb\xbf\n")
+    fake(stdout=_docker_output(passed=["covered/Dockerfile"], skipped=["suppressed/Dockerfile"]))
+
+    found = scan_directory(str(tmp_path))
+    assert [(f.rule_id, f.severity, f.file, f.line, f.message, f.redacted_match) for f in found] == [
+        ("config-unscanned", "low", "binary/Dockerfile", 0, UTF8_MESSAGE, ""),
+        ("config-unscanned", "low", "nonutf8/Dockerfile", 0, UTF8_MESSAGE, ""),
+        ("config-unscanned", "low", "text/Dockerfile", 0, NO_RESULT_MESSAGE, ""),
+    ]
+    dumped = json.dumps([f.to_dict() for f in found])
+    assert "SECRET-MARKER" not in dumped and "alpine" not in dumped
+
+
+@needs_checkov
+def test_find_dockerfiles_uses_checkov_names_and_folder_rules(tmp_path):
+    for rel in CHECKOV_SCANS + CHECKOV_IGNORES:
+        _write(tmp_path, rel, VALID_DOCKERFILE)
+    (tmp_path / "linked-dir").symlink_to(tmp_path / "sub")  # folder symlinks are not followed
+    assert set(find_dockerfiles(str(tmp_path))) == set(CHECKOV_SCANS)
+
+
+@needs_checkov
+def test_symlinked_dockerfile_is_never_read(tmp_path, fake, monkeypatch):
+    outside = tmp_path / "outside"
+    _write(outside, "real", VALID_DOCKERFILE)
+    _write(outside, "empty", "")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "covered.Dockerfile").symlink_to(outside / "real")
+    (root / "missed.Dockerfile").symlink_to(outside / "real")
+    (root / "empty.Dockerfile").symlink_to(outside / "empty")
+    fake(stdout=_docker_output(passed=["covered.Dockerfile"]))
+    monkeypatch.setattr(agent, "open", _no_reads, raising=False)
+
+    found = scan_directory(str(root))
+    # Not read, so an empty target cannot be told apart: both get the generic finding.
+    assert [(f.file, f.message) for f in found] == [
+        ("empty.Dockerfile", NO_RESULT_MESSAGE),
+        ("missed.Dockerfile", NO_RESULT_MESSAGE),
+    ]
+
+
+@needs_checkov
+def test_oversized_dockerfile_is_not_read(tmp_path, fake, monkeypatch):
+    _write(tmp_path, "Dockerfile", VALID_DOCKERFILE)
+    fake(stdout=EMPTY_SUMMARY)
+    monkeypatch.setattr(agent, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(agent, "open", _no_reads, raising=False)
+    assert [(f.file, f.message) for f in scan_directory(str(tmp_path))] == [("Dockerfile", NO_RESULT_MESSAGE)]
+
+
+@needs_checkov
+def test_exclude_applies_to_dockerfile_check(tmp_path, fake):
+    for rel in ("docker/Dockerfile", "api.Dockerfile", "app/Dockerfile"):
+        _write(tmp_path, rel, BINARY)
+    fake(stdout=EMPTY_SUMMARY)
+    found = scan_directory(str(tmp_path), exclude=("docker", "api.Dockerfile"))
+    assert [f.file for f in found] == ["app/Dockerfile"]
+
+
+@needs_checkov
+def test_checkov_walk_settings_are_not_passed_to_checkov(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("CKV_IGNORED_DIRECTORIES", "sub")
+    monkeypatch.setenv("CKV_IGNORE_HIDDEN_DIRECTORIES", "False")
+    checkov = fake(stdout=EMPTY_SUMMARY)
+    scan_directory(str(tmp_path))
+    (call,) = checkov.calls
+    assert "CKV_IGNORED_DIRECTORIES" not in call["env"]
+    assert "CKV_IGNORE_HIDDEN_DIRECTORIES" not in call["env"]
+
+
+@needs_yaml
+def test_missing_is_dockerfile_is_an_error_not_clean(tmp_path, fake, monkeypatch, capsys):
+    fake(stdout=EMPTY_SUMMARY)
+    monkeypatch.setitem(sys.modules, "checkov.common.util.dockerfile", None)  # makes the import fail
+    with pytest.raises(ConfigYamlError, match="is_dockerfile could not be imported"):
+        scan_directory(str(tmp_path))
+    assert main([str(tmp_path)]) == 2
+    assert "is_dockerfile" in capsys.readouterr().err
+
+
+@needs_checkov
+def test_real_checkov_unscanned_dockerfiles(tmp_path):
+    _write(tmp_path, "good/Dockerfile", (GOOD / "Dockerfile").read_text())
+    _write(tmp_path, "binary/Dockerfile", BINARY)
+    _write(tmp_path, "nonutf8/Dockerfile", NON_UTF8)
+    _write(tmp_path, "empty/Dockerfile", "")
+    _write(tmp_path, "comments/Dockerfile", "# only a comment\n# and another\n")
+
+    unscanned = [f for f in scan_directory(str(tmp_path)) if f.rule_id == "config-unscanned"]
+    assert [(f.file, f.message) for f in unscanned] == [
+        ("binary/Dockerfile", UTF8_MESSAGE),
+        ("nonutf8/Dockerfile", UTF8_MESSAGE),
+    ]
+    assert "SECRET-MARKER" not in json.dumps([f.to_dict() for f in unscanned])
+
+
+@needs_checkov
+def test_real_checkov_dockerfile_rules_have_not_drifted(tmp_path):
+    # If a Checkov upgrade changes which files it scans as Dockerfiles, this fails.
+    valid, broken = tmp_path / "valid", tmp_path / "broken"
+    for rel in CHECKOV_SCANS + CHECKOV_IGNORES:
+        _write(valid, rel, VALID_DOCKERFILE)
+        _write(broken, rel, BINARY)
+
+    # Valid content: exactly the files the agent walks are the files Checkov scans.
+    scanned = scanned_files(agent.run_checkov(str(valid)), "dockerfile")
+    assert scanned == set(CHECKOV_SCANS) == set(find_dockerfiles(str(valid)))
+    # Binary content: every one of them is reported, and nothing Checkov ignores.
+    found = scan_directory(str(broken))
+    assert {f.file for f in found if f.rule_id == "config-unscanned"} == set(CHECKOV_SCANS)
