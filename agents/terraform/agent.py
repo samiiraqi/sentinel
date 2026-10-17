@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 from shared.models import SEVERITIES, Finding
-from shared.paths import is_excluded
+from shared.paths import is_excluded, relative_to_root
 
 AGENT_NAME = "terraform"
 DEFAULT_SEVERITY = "medium"
@@ -60,17 +60,6 @@ def _unscanned(rel_path: str, reason: str) -> Finding:
         message=f"not scanned: {reason}",
         redacted_match="",
     )
-
-
-def _relative(path: str, root: str) -> str | None:
-    """Path relative to root with "/" separators, or None if it is not inside root."""
-    try:
-        rel = os.path.relpath(os.path.join(root, path), root).replace(os.sep, "/")
-    except ValueError:  # Windows: another drive
-        return None
-    if rel in (".", "..") or rel.startswith("../"):
-        return None
-    return rel
 
 
 def _parse_error_count(report: dict) -> int:
@@ -113,7 +102,7 @@ def parse_checkov_output(data: dict | list, root: str = "/") -> list[Finding]:
             raise CheckovError("unexpected checkov parsing_errors list")
         named = []
         for path in errors:
-            rel = _relative(path, root) if isinstance(path, str) and path else None
+            rel = relative_to_root(path, root) if isinstance(path, str) and path else None
             if rel is not None and rel not in named:
                 named.append(rel)
         # Only the path is kept; Checkov's error text is never copied.

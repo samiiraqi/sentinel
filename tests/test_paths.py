@@ -1,6 +1,6 @@
 import pytest
 
-from shared.paths import is_excluded
+from shared.paths import is_excluded, relative_to_root
 
 
 @pytest.mark.parametrize(
@@ -56,3 +56,21 @@ def test_empty_values_match_nothing(value):
 def test_no_values_and_multiple_values():
     assert not is_excluded("a/b.txt", ())
     assert is_excluded("b/c.txt", ("a", "b"))
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/scan/root/main.tf", "main.tf"),
+        ("/scan/root/a/b/c.yaml", "a/b/c.yaml"),
+        ("/scan/root/a/../b.tf", "b.tf"),
+        ("sub/x.tf", "sub/x.tf"),  # relative paths are taken from root
+        ("/scan/root", None),
+        ("/scan/rootx/main.tf", None),
+        ("/scan/root/../main.tf", None),
+        ("/elsewhere/main.tf", None),
+    ],
+)
+def test_relative_to_root(path, expected):
+    assert relative_to_root(path, "/scan/root") == expected
+

@@ -10,7 +10,12 @@ Matching is by whole path components, never by substring, so a value like
 
 Both "/" and "\\" are separators. A leading "./" and leading or trailing
 "/" are ignored. Empty values (and ".") match nothing. No wildcards.
+
+relative_to_root turns a path a tool reports (e.g. Checkov's absolute
+parsing_errors paths) into a path relative to the scan root.
 """
+
+import os
 
 
 def _parts(path: str) -> list[str]:
@@ -30,3 +35,14 @@ def is_excluded(rel_path: str, exclude: tuple[str, ...]) -> bool:
         elif parts[: len(want)] == want:
             return True
     return False
+
+
+def relative_to_root(path: str, root: str) -> str | None:
+    """Path relative to root with "/" separators, or None if it is not inside root."""
+    try:
+        rel = os.path.relpath(os.path.join(root, path), root).replace(os.sep, "/")
+    except ValueError:  # Windows: another drive
+        return None
+    if rel in (".", "..") or rel.startswith("../"):
+        return None
+    return rel
