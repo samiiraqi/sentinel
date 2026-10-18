@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agents.config_yaml import agent
+from agents.gha import agent as gha_agent
 from agents.config_yaml.agent import (
     ConfigYamlError,
     check_yaml_files,
@@ -33,6 +34,7 @@ needs_yaml = pytest.mark.skipif(
 )
 
 # Trimmed from real `checkov --framework kubernetes dockerfile github_actions -o json --compact` output (3.3.29).
+# The agent no longer runs github_actions; that report stays to test the parser on any report.
 SAMPLE = [
     {
         "check_type": "kubernetes",
@@ -213,7 +215,8 @@ def test_checkov_runs_offline_without_api_keys(tmp_path, fake, monkeypatch):
 
     (call,) = checkov.calls
     assert "--skip-download" in call["cmd"]
-    assert call["cmd"][call["cmd"].index("--framework") + 1:][:3] == ["kubernetes", "dockerfile", "github_actions"]
+    assert call["cmd"][call["cmd"].index("--framework") + 1:][:3] == ["kubernetes", "dockerfile", "-o"]
+    assert "github_actions" not in call["cmd"]  # the gha agent owns workflows
     assert call["cwd"] == str(tmp_path)
     assert call["timeout"] == agent.TIMEOUT_SECONDS
     assert "BC_API_KEY" not in call["env"] and "PRISMA_API_URL" not in call["env"]
@@ -240,18 +243,24 @@ def test_invalid_yaml_is_reported_unscanned(tmp_path, fake):
 
 
 @needs_yaml
-def test_workflow_without_checkov_result_is_unscanned(tmp_path, fake):
+def test_gha_files_are_never_reported(tmp_path, fake):
+    # Workflows and action.yml files belong to the gha agent: no rule findings,
+    # no config-unscanned findings, even if invalid or if Checkov reports one.
     wf = tmp_path / ".github" / "workflows"
     wf.mkdir(parents=True)
-    (wf / "seen.yml").write_text("name: a\non: push\njobs: {}\n")
     (wf / "missed.yaml").write_text("name: b\non: push\njobs: {}\n")
-    fake(stdout={"check_type": "github_actions", "results": {"passed_checks": [
-        {"check_id": "CKV_GHA_1", "file_path": "/.github/workflows/seen.yml"},
-    ]}})
+    (wf / "invalid.yml").write_text("jobs: [\n")
+    (tmp_path / "action.yml").write_text("runs: [\n")
+    (tmp_path / "k8s.yaml").write_text("a: [\n")
+    fake(stdout=[
+        {"check_type": "kubernetes", "results": {"parsing_errors": [str(wf / "invalid.yml")]}},
+        {"check_type": "github_actions", "results": {"failed_checks": [
+            {"check_id": "CKV_GHA_2", "check_name": "x", "file_path": "/.github/workflows/missed.yaml"},
+        ]}},
+    ])
 
     found = scan_directory(str(tmp_path))
-    assert [(f.rule_id, f.file) for f in found] == [("config-unscanned", ".github/workflows/missed.yaml")]
-    assert "no result" in found[0].message
+    assert [(f.rule_id, f.file) for f in found] == [("config-unscanned", "k8s.yaml")]
 
 
 @needs_yaml
@@ -270,9 +279,8 @@ def test_coverage_check_skips_vendored_dirs_and_symlinks(tmp_path):
     (tmp_path / "outside.yaml").write_text("a: [\n")
     (tmp_path / "link.yaml").symlink_to(tmp_path / "outside.yaml")
 
-    unscanned, workflows = check_yaml_files(str(tmp_path))
+    unscanned = check_yaml_files(str(tmp_path))
     assert [f.file for f in unscanned] == ["outside.yaml"]
-    assert workflows == []
 
 
 @needs_yaml
@@ -356,7 +364,7 @@ def test_bad_fixtures_have_expected_findings():
         by_file.setdefault(f.file, set()).add(f.rule_id)
     assert {"CKV_K8S_16", "CKV_K8S_19"} <= by_file["k8s/deployment.yaml"]
     assert {"CKV_DOCKER_2", "CKV_DOCKER_3", "CKV_DOCKER_7"} <= by_file["Dockerfile"]
-    assert "CKV_GHA_2" in by_file[".github/workflows/bad.yml"]
+    assert ".github/workflows/bad.yml" not in by_file  # owned by the gha agent
     assert all(f.agent == "config_yaml" and f.rule_id != "config-unscanned" for f in found)
 
 
@@ -367,12 +375,16 @@ def test_good_fixtures_have_no_findings(capsys):
 
 
 @needs_checkov
-def test_real_checkov_silent_skip_is_caught(tmp_path):
+@pytest.mark.skipif(gha_agent.zizmor_path() is None, reason="zizmor not installed (pip install -r requirements-gha.txt)")
+def test_real_silent_skip_workflow_is_reported_by_gha_only(tmp_path):
+    # A workflow Checkov used to skip silently: config_yaml now leaves it to
+    # the gha agent, which must report it, never return it as clean.
     wf = tmp_path / ".github" / "workflows"
     wf.mkdir(parents=True)
     (wf / "broken.yml").write_text('jobs:\n  a:\n    steps:\n      - run: echo "a: b"\n')
-    found = scan_directory(str(tmp_path))
-    assert [(f.rule_id, f.file) for f in found] == [("config-unscanned", ".github/workflows/broken.yml")]
+    assert scan_directory(str(tmp_path)) == []
+    found = gha_agent.scan_directory(str(tmp_path))
+    assert [(f.rule_id, f.file) for f in found] == [("gha-unscanned", ".github/workflows/broken.yml")]
 
 
 @needs_checkov
