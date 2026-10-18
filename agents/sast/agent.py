@@ -32,7 +32,6 @@ import argparse
 import importlib.util
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -40,6 +39,7 @@ import time
 
 from shared.models import SEVERITIES, Finding
 from shared.paths import is_excluded, relative_to_root
+from shared.proc import run_tool as _run_tool
 
 AGENT_NAME = "sast"
 DEFAULT_SEVERITY = "medium"
@@ -47,7 +47,6 @@ UNSCANNED_RULE = "sast-unscanned"
 UNSCANNED_SEVERITY = "low"
 TIMEOUT_SECONDS = 300  # cap for a whole scan
 MIN_RUN_SECONDS = 1.0  # do not start a batch with less time than this left
-KILL_WAIT_SECONDS = 5
 BATCH_SIZE = 200  # files per Bandit run, to keep the command line short
 MAX_FILE_BYTES = 5 * 1024 * 1024
 PY_SUFFIXES = (".py", ".pyw")
@@ -176,41 +175,6 @@ def find_python_files(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[st
             else:
                 files.append(rel)
     return files, unscanned
-
-
-def _run_tool(cmd: list[str], timeout: float, cwd: str, env: dict) -> subprocess.CompletedProcess:
-    """Run a tool in its own process group. On a timeout (or any other error,
-    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
-    posix = os.name == "posix"
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env=env,
-        start_new_session=posix,  # new session: process group id == proc.pid
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except BaseException:
-        _kill_group(proc, posix)
-        raise
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-
-
-def _kill_group(proc: subprocess.Popen, posix: bool) -> None:
-    if posix:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # already gone
-    else:
-        proc.kill()  # Windows: no process groups here, only the tool itself
-    try:
-        proc.communicate(timeout=KILL_WAIT_SECONDS)  # reap it and drain the pipes
-    except subprocess.TimeoutExpired:
-        proc.wait()
 
 
 def run_bandit(root: str, files: list[str], config: str, ini: str, timeout: float) -> dict:

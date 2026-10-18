@@ -10,6 +10,9 @@ or invalid output, or a timeout raises CheckovError. Checkov skips .tf
 files it cannot parse, so each one becomes a low "terraform-unscanned"
 finding (and one more if Checkov counts parse errors it gives no name for).
 
+TIME LIMIT: on a timeout (or Ctrl-C), Checkov and all its child processes
+are killed (see shared.proc).
+
 Usage: python -m agents.terraform.agent <folder> [--exclude TEXT ...]
 Exit code: 0 = no findings, 1 = findings, 2 = error.
 """
@@ -23,6 +26,7 @@ import sys
 
 from shared.models import SEVERITIES, Finding
 from shared.paths import is_excluded, relative_to_root
+from shared.proc import run_tool as _run_tool
 
 AGENT_NAME = "terraform"
 DEFAULT_SEVERITY = "medium"
@@ -140,9 +144,7 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     # Never pass an API key to Checkov, even if one is set in the environment.
     env = {k: v for k, v in os.environ.items() if k not in ("BC_API_KEY", "PRISMA_API_URL")}
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, env=env, check=False
-        )
+        proc = _run_tool(cmd, TIMEOUT_SECONDS, env=env)
     except subprocess.TimeoutExpired as exc:
         raise CheckovError(f"checkov timed out after {TIMEOUT_SECONDS}s") from exc
 

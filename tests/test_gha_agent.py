@@ -15,6 +15,7 @@ from agents.gha.agent import (
     scan_directory,
     zizmor_path,
 )
+from shared import proc as shared_proc
 
 REPO = Path(__file__).parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -282,9 +283,9 @@ def test_one_deadline_for_the_whole_scan(tmp_path, fake):
     assert [c["timeout"] for c in zizmor.calls] == [200.0, 100.0]
 
 
-def test_run_tool_kills_on_timeout():
-    with pytest.raises(subprocess.TimeoutExpired):
-        agent._run_tool(["sleep", "30"], timeout=0.2, cwd=".", env={"PATH": "/usr/bin:/bin"})
+def test_uses_the_shared_process_runner():
+    # Kill-on-timeout (child and grandchild) is tested once, in tests/test_proc.py.
+    assert agent._run_tool is shared_proc.run_tool
 
 
 # ---------------------------------------------------------------- how zizmor is run

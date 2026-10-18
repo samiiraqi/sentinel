@@ -18,6 +18,7 @@ from agents.config_yaml.agent import (
     scan_directory,
     scanned_files,
 )
+from shared import proc as shared_proc
 
 FIXTURES = Path(__file__).parent / "fixtures" / "config_yaml"
 BAD = FIXTURES / "bad"
@@ -222,9 +223,9 @@ def test_checkov_runs_offline_without_api_keys(tmp_path, fake, monkeypatch):
     assert "BC_API_KEY" not in call["env"] and "PRISMA_API_URL" not in call["env"]
 
 
-def test_run_tool_kills_on_timeout():
-    with pytest.raises(subprocess.TimeoutExpired):
-        agent._run_tool(["sleep", "30"], timeout=0.2, cwd=".", env={"PATH": "/usr/bin:/bin"})
+def test_uses_the_shared_process_runner():
+    # Kill-on-timeout (child and grandchild) is tested once, in tests/test_proc.py.
+    assert agent._run_tool is shared_proc.run_tool
 
 
 # ---------------------------------------------------------------- coverage check

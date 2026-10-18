@@ -188,8 +188,6 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 - The config_yaml YAML coverage walk does not match Checkov's folder rules exactly: it skips `venv/` and `__pycache__/`, which Checkov scans, and it walks hidden folders, which Checkov skips.
 - The config_yaml Dockerfile check copies Checkov's folder rules, so it depends on Checkov internals. A test fails if a Checkov upgrade changes them.
 - A symlinked Dockerfile that points to an empty file gets a low `config-unscanned` finding, because symlinks are never read.
-- When the terraform agent times out, Checkov's child processes are not killed.
-- Known debt: the process-running code (`_run_tool`, `_kill_group`) is copied in four agents (config_yaml, dependencies, sast, gha) instead of being shared.
 - Finding order is not fixed between runs: findings with the same severity, file, and line can come out in a different order.
 
 **Backend, dashboard, and tooling**

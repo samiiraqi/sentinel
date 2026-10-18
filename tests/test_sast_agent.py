@@ -16,6 +16,7 @@ from agents.sast.agent import (
     scan_directory,
     scanned_files,
 )
+from shared import proc as shared_proc
 
 needs_bandit = pytest.mark.skipif(
     importlib.util.find_spec("bandit") is None,
@@ -240,9 +241,9 @@ def test_file_without_bandit_result_is_unscanned(tmp_path, fake):
     ]
 
 
-def test_run_tool_kills_on_timeout():
-    with pytest.raises(subprocess.TimeoutExpired):
-        agent._run_tool(["sleep", "30"], timeout=0.2, cwd=".", env={"PATH": "/usr/bin:/bin"})
+def test_uses_the_shared_process_runner():
+    # Kill-on-timeout (child and grandchild) is tested once, in tests/test_proc.py.
+    assert agent._run_tool is shared_proc.run_tool
 
 
 # ---------------------------------------------------------------- how bandit is run
