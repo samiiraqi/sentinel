@@ -1,7 +1,7 @@
 """Orchestrator: runs every agent on a folder and merges one report.
 
 READ-ONLY: it only calls each agent's scan_directory (secrets, terraform,
-dependencies, config_yaml, sast, gha), which never changes files. It adds no scanning logic of its own. Findings already hold
+dependencies, config_yaml, sast, gha, git_history), which never changes files. It adds no scanning logic of its own. Findings already hold
 redacted values only; nothing raw is added here. If one agent fails, the
 others still run and the failure is recorded in the report.
 
@@ -24,6 +24,7 @@ import sys
 from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
 from agents.gha import agent as gha_agent
+from agents.git_history import agent as git_history_agent
 from agents.sast import agent as sast_agent
 from agents.secrets import agent as secrets_agent
 from agents.terraform import agent as terraform_agent
@@ -37,6 +38,7 @@ AGENTS = {
     config_yaml_agent.AGENT_NAME: config_yaml_agent.scan_directory,
     sast_agent.AGENT_NAME: sast_agent.scan_directory,
     gha_agent.AGENT_NAME: gha_agent.scan_directory,
+    git_history_agent.AGENT_NAME: git_history_agent.scan_directory,
 }
 
 # Agents that contact the network. Only these get the `offline` flag.

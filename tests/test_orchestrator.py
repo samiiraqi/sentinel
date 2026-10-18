@@ -8,6 +8,7 @@ import pytest
 from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
 from agents.gha import agent as gha_agent
+from agents.git_history import agent as git_history_agent
 from agents.sast import agent as sast_agent
 from orchestrator import orchestrator
 from orchestrator.orchestrator import apply_severity, main, run_all, sort_findings
@@ -124,6 +125,9 @@ def test_one_failing_agent_does_not_stop_the_others(tmp_path, monkeypatch, capsy
 
     monkeypatch.setitem(orchestrator.AGENTS, "secrets", fake_secrets)
     monkeypatch.setitem(orchestrator.AGENTS, "terraform", broken)
+    # tmp_path is not a git repo, so the real git_history agent would add a
+    # git-history-unscanned finding; this test counts only the secrets one.
+    monkeypatch.setitem(orchestrator.AGENTS, "git_history", lambda path, exclude=(): [])
 
     report = run_all(str(tmp_path))
     assert report["agents"]["terraform"] == {
@@ -274,6 +278,38 @@ def test_integration_includes_gha_findings():
     ]
 
 
+def test_git_history_agent_is_registered_and_offline():
+    assert orchestrator.AGENTS["git_history"] is git_history_agent.scan_directory
+    assert "git_history" not in orchestrator.NETWORK_AGENTS
+
+
+def test_failed_git_history_agent_is_never_clean(tmp_path, monkeypatch, capsys):
+    _all_agents_return(monkeypatch, {})
+
+    def broken(path, exclude=()):
+        raise git_history_agent.GitHistoryError(git_history_agent.INSTALL_HINT)
+
+    monkeypatch.setitem(orchestrator.AGENTS, "git_history", broken)
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["git_history"]["status"] == "failed"
+    assert "git is not installed" in report["agents"]["git_history"]["error"]
+
+
+def test_unscanned_git_history_is_never_clean(tmp_path, monkeypatch, capsys):
+    # A folder that is not a git repo: the real agent reports it, so exit 1, not 0.
+    _all_agents_return(monkeypatch, {})
+    monkeypatch.setitem(orchestrator.AGENTS, "git_history", git_history_agent.scan_directory)
+    assert main([str(tmp_path)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert [f["rule_id"] for f in report["findings"]] == ["git-history-unscanned"]
+
+
+def test_integration_git_history_adds_nothing_on_fixtures():
+    report = run_all(str(FIXTURES))
+    assert report["agents"]["git_history"] == {"status": "ok", "error": None, "count": 0}
+
+
 def test_run_does_not_modify_files():
     before = _snapshot(FIXTURES)
     run_all(str(FIXTURES))
@@ -385,6 +421,7 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     monkeypatch.setitem(orchestrator.AGENTS, "config_yaml", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "sast", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "gha", plain)
+    monkeypatch.setitem(orchestrator.AGENTS, "git_history", plain)
 
     report = run_all(str(tmp_path), offline=True)
     assert report["agents"]["dependencies"]["status"] == "failed"
@@ -394,7 +431,8 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     assert report["agents"]["config_yaml"]["status"] == "ok"
     assert report["agents"]["sast"]["status"] == "ok"
     assert report["agents"]["gha"]["status"] == "ok"
-    assert len(calls) == 5
+    assert report["agents"]["git_history"]["status"] == "ok"
+    assert len(calls) == 6
 
 
 def test_cli_offline_flag(tmp_path, monkeypatch, capsys):
