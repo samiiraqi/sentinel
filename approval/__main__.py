@@ -5,8 +5,9 @@ Usage: python -m approval <folder> [--exclude TEXT ...] [--log audit/decisions.j
 --offline: the dependencies agent does not contact online vulnerability
 databases (it is reported as failed).
 
-The config_yaml agent (Kubernetes, Dockerfile, GitHub Actions via Checkov) runs offline.
+The config_yaml agent (Kubernetes, Dockerfile via Checkov) runs offline.
 The sast agent (Python only, via Bandit) runs offline.
+The gha agent (GitHub Actions workflows and actions, via zizmor) runs offline.
 """
 
 import argparse

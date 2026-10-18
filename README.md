@@ -8,11 +8,11 @@ https://github.com/user-attachments/assets/b4bb6e6d-b91c-486f-be12-415355df60f8
 
 ## What it does
 
-- **Finds problems.** Five agents scan a folder and an orchestrator merges their results into one report.
+- **Finds problems.** Six agents scan a folder and an orchestrator merges their results into one report.
 - **Changes nothing.** Agents only read files. Nothing is fixed, installed, or deployed, and Terraform is never run.
 - **Leaves the decision to a person.** Each finding is approved, rejected, or deferred by a human, from a CLI or a web dashboard. A decision is a record only; it never triggers an action.
 
-In this project an **agent** is a specialist scanner with fixed rules: a Python module that runs its own checks or a well-known tool (Checkov, pip-audit, npm audit, Bandit) and turns the result into findings. **No agent calls an AI model.**
+In this project an **agent** is a specialist scanner with fixed rules: a Python module that runs its own checks or a well-known tool (Checkov, pip-audit, npm audit, Bandit, zizmor) and turns the result into findings. **No agent calls an AI model.**
 
 ## Architecture
 
@@ -25,10 +25,11 @@ flowchart LR
         cy["config_yaml<br/>Checkov + coverage check"]
         dep["dependencies<br/>pip-audit, npm audit"]
         sast["sast<br/>Bandit (Python only)"]
+        gha["gha<br/>zizmor (GitHub Actions)"]
     end
-    folder --> sec & tf & cy & dep & sast
+    folder --> sec & tf & cy & dep & sast & gha
     dep -. "package names and versions only" .-> reg[("PyPI / npm registry")]
-    sec & tf & cy & dep & sast --> orch["Orchestrator<br/>one merged report"]
+    sec & tf & cy & dep & sast & gha --> orch["Orchestrator<br/>one merged report"]
     orch --> cli["Approval CLI"]
     orch --> api["Backend API<br/>FastAPI on 127.0.0.1:8000"]
     api <--> ui["Dashboard<br/>React on 127.0.0.1:5173"]
@@ -49,17 +50,18 @@ flowchart LR
 |---|---|---|---|
 | `secrets` | Built-in patterns | AWS access key IDs, private key headers, Anthropic API keys, and generic `password` / `secret` / `token` / `api_key` assignments. Found values are redacted to at most 4 characters plus `****`. | No |
 | `terraform` | Checkov (`--framework terraform`) | Insecure Terraform resources, such as SSH open to the world, public S3 buckets, or unencrypted volumes. `.tf` files Checkov cannot parse become `terraform-unscanned` findings. | No (`--skip-download`) |
-| `config_yaml` | Checkov (Kubernetes, Dockerfile, GitHub Actions) | Insecure Kubernetes manifests, Dockerfiles, and workflows. Its own coverage check reports invalid YAML, workflows with no Checkov result, and Dockerfiles Checkov skipped (for example binary or non-UTF-8 files) as `config-unscanned`. | No (`--skip-download`) |
+| `config_yaml` | Checkov (Kubernetes, Dockerfile) | Insecure Kubernetes manifests and Dockerfiles. Its own coverage check reports invalid YAML and Dockerfiles Checkov skipped (for example binary or non-UTF-8 files) as `config-unscanned`. GitHub Actions files are left to the `gha` agent. | No (`--skip-download`) |
 | `dependencies` | pip-audit, npm audit | Known-vulnerable packages in `requirements*.txt` (pinned `name==version` lines) and `package-lock.json`. Unpinned lines become `unpinned-dependency`; anything it cannot check becomes `unaudited-dependency`. | **Yes**: sends package names and versions only. `--offline` makes it refuse to run. |
 | `sast` | Bandit | Insecure Python code (`.py`, `.pyw`), such as `shell=True`, `eval`, `pickle`, or `yaml.load`. Runs with its own empty Bandit config and `--ignore-nosec`, so a scanned folder's `.bandit` / `pyproject.toml` settings and `# nosec` comments cannot hide findings. Files Bandit cannot parse (syntax errors, non-UTF-8) or returns no result for, symlinks, and files over 5 MB become `sast-unscanned`. Python only. | No |
+| `gha` | zizmor (`--persona regular`) | Insecure GitHub Actions workflows (`.github/workflows/*.yml`) and `action.yml` files, such as template injection, overly broad permissions, unpinned actions, or checkout keeping credentials. It is the only agent that scans these files. Runs with `--no-config` and `--no-ignores`, so a scanned folder's `zizmor.yml` and `# zizmor: ignore` comments cannot hide findings. Files zizmor cannot parse (invalid YAML, not a valid workflow), non-UTF-8 files, symlinks, and files over 5 MB become `gha-unscanned`. | No (`--offline`; GitHub tokens are not passed to it) |
 
 Every agent has the same exit codes: `0` = no findings, `1` = findings, `2` = error.
 
 ## Design principles
 
-- **Read-only.** Agents open files for reading only. pip-audit runs with `--disable-pip --no-deps` on a temporary copy of the pinned lines; npm audit runs with `--package-lock-only`; Checkov runs offline with no API key passed to it; Bandit parses Python files without running them.
+- **Read-only.** Agents open files for reading only. pip-audit runs with `--disable-pip --no-deps` on a temporary copy of the pinned lines; npm audit runs with `--package-lock-only`; Checkov runs offline with no API key passed to it; Bandit parses Python files without running them; zizmor runs with `--offline` and never with `--fix`.
 - **A scan never looks clean by accident.** A missing tool, a bad exit code, empty or invalid tool output, or a timeout is an error (exit `2`), not "no findings". Files a tool silently skipped are reported as `*-unscanned` findings. The orchestrator exits `2` if any agent failed, and the dashboard shows a "Scan incomplete" banner.
-- **No raw secrets in output.** Findings carry only redacted values and the tool's check id, name, file, line, and resource id (for Bandit: test id, test name, CWE, and confidence); raw file content is never copied into a finding. Bandit's `issue_text` and `code` fields are never used, because they can hold source code or a matched password.
+- **No raw secrets in output.** Findings carry only redacted values and the tool's check id, name, file, line, and resource id (for Bandit: test id, test name, CWE, and confidence); raw file content is never copied into a finding. Bandit's `issue_text` and `code` fields are never used, because they can hold source code or a matched password. zizmor's `feature`, `fragment`, and `annotation` fields are never used either, because they hold workflow text.
 - **Local only.** The backend binds to 127.0.0.1 and allows browser calls only from the local dashboard (`localhost:5173` / `127.0.0.1:5173`). The scan folder is fixed when the backend starts and is never taken from a request.
 
 ## Human review and audit log
@@ -79,7 +81,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt -r requirements-backend.txt \
             -r requirements-terraform.txt -r requirements-dependencies.txt \
-            -r requirements-sast.txt
+            -r requirements-sast.txt -r requirements-gha.txt
 ```
 
 Scan a folder from the command line:
@@ -92,6 +94,7 @@ python -m orchestrator.orchestrator path/to/project --offline
 python -m agents.secrets.agent path/to/project
 python -m agents.terraform.agent path/to/project --exclude modules/legacy
 python -m agents.sast.agent path/to/project --exclude tests
+python -m agents.gha.agent path/to/project
 
 # Review findings and record decisions in the audit log
 python -m approval path/to/project
@@ -159,7 +162,7 @@ These rules apply to everyone who works on Sentinel, including AI coding assista
 
 | Area | Built | Planned |
 |---|---|---|
-| Agents | secrets, terraform, config_yaml, dependencies, sast (Python only) | app code, frontend, availability, WAF, CloudFront, DAST, SAST for TypeScript |
+| Agents | secrets, terraform, config_yaml, dependencies, sast (Python only), gha (GitHub Actions) | app code, frontend, availability, WAF, CloudFront, DAST, SAST for TypeScript |
 | Review | orchestrator, approval CLI, backend API, dashboard, audit log | |
 | Infrastructure as code | | AWS and Azure (plan only, never apply) |
 | Containers | | Docker images, `docker-compose.yml`, image scanning with Trivy and Hadolint |
@@ -176,15 +179,17 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 - The terraform agent does not download remote modules (`--skip-download`), so their code is not scanned, and it does not scan Terraform plan files.
 - The sast agent scans Python only (Bandit). TypeScript and other languages are not scanned.
 - The sast agent reports every `assert` as B101 (low). Test code is full of them: without `--exclude tests`, nearly all findings on this repository are B101 in `tests/`. Use `--exclude tests` when scanning code with tests. The backend's default `.` scan excludes only `tests/fixtures` and `.venv`, so it shows them.
+- Checkov no longer scans GitHub Actions workflows (the `gha` agent owns them), so Checkov's heuristic checks CKV_GHA_3 (curl with secrets) and CKV_GHA_4 (netcat with an IP address) are no longer run. zizmor has no direct match for them.
+- The gha agent runs zizmor at its "regular" level, so zizmor's pedantic and auditor findings are hidden on purpose, to keep false positives low. Its five online audits (for example known-vulnerable actions and impostor commits) are off, because they need a GitHub token and the network.
 - Offline, Checkov gives no severity for most checks. Those findings default to `medium`; only the rules in the orchestrator's severity table get a specific level.
 
 **Robustness**
-- One unusual file can crash Checkov (for example a Kubernetes manifest with `spec: 5`, a workflow with `steps: 5`, or a broken symlink named `Dockerfile`). The config_yaml agent then fails as a whole: this is reported as an error, never as clean, but no config findings are returned for that scan.
+- One unusual file can crash Checkov (for example a Kubernetes manifest with `spec: 5`, or a broken symlink named `Dockerfile`). The config_yaml agent then fails as a whole: this is reported as an error, never as clean, but no config findings are returned for that scan.
 - The config_yaml YAML coverage walk does not match Checkov's folder rules exactly: it skips `venv/` and `__pycache__/`, which Checkov scans, and it walks hidden folders, which Checkov skips.
 - The config_yaml Dockerfile check copies Checkov's folder rules, so it depends on Checkov internals. A test fails if a Checkov upgrade changes them.
 - A symlinked Dockerfile that points to an empty file gets a low `config-unscanned` finding, because symlinks are never read.
 - When the terraform agent times out, Checkov's child processes are not killed.
-- Known debt: the process-running code (`_run_tool`, `_kill_group`) is copied in the config_yaml, dependencies, and sast agents instead of being shared.
+- Known debt: the process-running code (`_run_tool`, `_kill_group`) is copied in four agents (config_yaml, dependencies, sast, gha) instead of being shared.
 - Finding order is not fixed between runs: findings with the same severity, file, and line can come out in a different order.
 
 **Backend, dashboard, and tooling**
@@ -197,7 +202,7 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 ## Project layout
 
 ```
-agents/          secrets, terraform, config_yaml, dependencies, sast (empty folders: planned agents)
+agents/          secrets, terraform, config_yaml, dependencies, sast, gha (empty folders: planned agents)
 orchestrator/    runs all agents and merges one report
 approval/        audit-log writer and the interactive approval CLI
 backend/         FastAPI app
