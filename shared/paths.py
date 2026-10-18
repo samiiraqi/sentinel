@@ -13,9 +13,16 @@ Both "/" and "\\" are separators. A leading "./" and leading or trailing
 
 relative_to_root turns a path a tool reports (e.g. Checkov's absolute
 parsing_errors paths) into a path relative to the scan root.
+
+is_gha_file says which files the gha agent owns (GitHub Actions workflows
+and action definitions). Other agents skip them, so the same file never
+gets two sets of findings.
 """
 
 import os
+
+YAML_SUFFIXES = (".yml", ".yaml")
+ACTION_FILES = ("action.yml", "action.yaml")
 
 
 def _parts(path: str) -> list[str]:
@@ -46,3 +53,13 @@ def relative_to_root(path: str, root: str) -> str | None:
     if rel in (".", "..") or rel.startswith("../"):
         return None
     return rel
+
+
+def is_gha_file(rel_path: str) -> bool:
+    """True for a workflow (.github/workflows/*.yml|yaml, at any depth) or an action.yml|yaml file."""
+    parts = _parts(rel_path)
+    if not parts:
+        return False
+    if parts[-1] in ACTION_FILES:
+        return True
+    return parts[-1].endswith(YAML_SUFFIXES) and parts[-3:-1] == [".github", "workflows"]

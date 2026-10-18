@@ -1,6 +1,6 @@
 import pytest
 
-from shared.paths import is_excluded, relative_to_root
+from shared.paths import is_excluded, is_gha_file, relative_to_root
 
 
 @pytest.mark.parametrize(
@@ -74,3 +74,26 @@ def test_no_values_and_multiple_values():
 def test_relative_to_root(path, expected):
     assert relative_to_root(path, "/scan/root") == expected
 
+
+
+@pytest.mark.parametrize(
+    "rel_path, expected",
+    [
+        (".github/workflows/ci.yml", True),
+        (".github/workflows/ci.yaml", True),
+        ("./.github/workflows/ci.yml", True),
+        ("app/.github/workflows/ci.yml", True),
+        ("action.yml", True),
+        ("actions/setup/action.yaml", True),
+        (".github/workflows/deep/ci.yml", False),  # GitHub does not read subfolders
+        (".github/workflows/notes.txt", False),
+        (".github/dependabot.yml", False),
+        ("workflows/ci.yml", False),
+        ("github/workflows/ci.yml", False),
+        ("my-action.yml", False),
+        ("k8s/deployment.yaml", False),
+        ("", False),
+    ],
+)
+def test_is_gha_file(rel_path, expected):
+    assert is_gha_file(rel_path) is expected

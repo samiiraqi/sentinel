@@ -5,13 +5,14 @@
 - [x] Terraform agent
 - [ ] App code agent
 - [ ] Frontend agent
-- [x] Config / YAML agent (Checkov: Kubernetes, Dockerfile, GitHub Actions; Docker Compose not covered yet)
+- [x] Config / YAML agent (Checkov: Kubernetes, Dockerfile; Docker Compose not covered yet)
 - [x] Secrets agent
 - [x] Dependencies agent
 - [ ] Availability agent
 - [ ] WAF agent (checks WAF config in AWS/Azure code)
 - [ ] CloudFront agent (checks CloudFront config)
 - [x] SAST agent (Bandit: Python only; TypeScript not covered yet)
+- [x] GHA agent (zizmor) (regular level; Checkov GHA heuristics dropped)
 - [ ] DAST agent (scans a running app; needs a design decision because it sends requests, which conflicts with the read-only rule)
 
 ## Approval

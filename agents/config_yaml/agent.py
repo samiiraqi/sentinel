@@ -1,5 +1,10 @@
-"""Config / YAML agent: finds insecure Kubernetes manifests, Dockerfiles and
-GitHub Actions workflows using Checkov.
+"""Config / YAML agent: finds insecure Kubernetes manifests and Dockerfiles
+using Checkov.
+
+NOT GITHUB ACTIONS: workflows and action.yml files belong to the gha agent
+(zizmor) alone (see shared.paths.is_gha_file). This agent does not run
+Checkov's github_actions framework and reports nothing for those files, so
+the same file never gets two sets of findings.
 
 READ-ONLY: Checkov only reads the folder, and this agent only opens files
 for reading. Checkov runs offline (--skip-download, no API key). Only the
@@ -8,8 +13,8 @@ check id, name, file, line, and resource id are kept; Checkov's raw values
 
 NEVER LOOKS CLEAN BY ACCIDENT: a missing checkov, a bad exit code, empty
 or invalid output, or a timeout raises ConfigYamlError. Checkov silently
-skips invalid YAML, workflows and Dockerfiles it cannot read (e.g. binary
-or non-UTF-8), so this agent also checks coverage itself: such files become
+skips invalid YAML and Dockerfiles it cannot read (e.g. binary or
+non-UTF-8), so this agent also checks coverage itself: such files become
 low "config-unscanned" findings.
 
 Usage: python -m agents.config_yaml.agent <folder> [--exclude TEXT ...]
@@ -25,10 +30,10 @@ import subprocess
 import sys
 
 from shared.models import SEVERITIES, Finding
-from shared.paths import is_excluded, relative_to_root
+from shared.paths import is_excluded, is_gha_file, relative_to_root
 
 AGENT_NAME = "config_yaml"
-FRAMEWORKS = ("kubernetes", "dockerfile", "github_actions")
+FRAMEWORKS = ("kubernetes", "dockerfile")  # no github_actions: the gha agent owns workflows
 DEFAULT_SEVERITY = "medium"
 UNSCANNED_RULE = "config-unscanned"
 UNSCANNED_SEVERITY = "low"
@@ -135,27 +140,18 @@ def scanned_files(
     return files
 
 
-def _is_workflow(rel_path: str) -> bool:
-    parts = rel_path.split("/")
-    return (
-        rel_path.endswith(YAML_SUFFIXES)
-        and len(parts) >= 3
-        and parts[-3:-1] == [".github", "workflows"]
-    )
+def check_yaml_files(root: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
+    """Read-only coverage check of every .yml/.yaml file under root, except
+    the gha agent's files (workflows, action.yml).
 
-
-def check_yaml_files(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[Finding], list[str]]:
-    """Read-only coverage check of every .yml/.yaml file under root.
-
-    Returns (config-unscanned findings for invalid or unreadable YAML,
-    relative paths of valid workflow files that Checkov must have scanned).
+    Returns config-unscanned findings for invalid or unreadable YAML.
     """
     try:
         import yaml  # installed with checkov
     except ImportError as exc:
         raise ConfigYamlError(INSTALL_HINT) from exc
 
-    unscanned, workflows = [], []
+    unscanned = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = sorted(
             d
@@ -169,7 +165,7 @@ def check_yaml_files(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[Fin
                 continue
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root).replace(os.sep, "/")
-            if os.path.islink(full) or is_excluded(rel, exclude):
+            if os.path.islink(full) or is_excluded(rel, exclude) or is_gha_file(rel):
                 continue
             try:
                 if os.path.getsize(full) > MAX_FILE_BYTES:
@@ -185,10 +181,7 @@ def check_yaml_files(root: str, exclude: tuple[str, ...] = ()) -> tuple[list[Fin
                 continue
             except (OSError, UnicodeDecodeError):
                 unscanned.append(_unscanned(rel, "file could not be read as UTF-8 text"))
-                continue
-            if _is_workflow(rel):
-                workflows.append(rel)
-    return unscanned, workflows
+    return unscanned
 
 
 def _checkov_skips(name: str) -> bool:
@@ -318,10 +311,11 @@ def run_checkov(root: str) -> dict | list:
 
 
 def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
-    """Run Checkov (Kubernetes, Dockerfile, GitHub Actions; offline) on a folder.
+    """Run Checkov (Kubernetes, Dockerfile; offline) on a folder.
 
     Findings whose file path matches a value in `exclude` (by whole path
-    components, see shared.paths.is_excluded) are skipped.
+    components, see shared.paths.is_excluded) are skipped, and so are
+    findings on the gha agent's files.
     """
     root = os.path.abspath(path)
     if not os.path.isdir(root):
@@ -333,15 +327,8 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
     data = run_checkov(root)
     findings = parse_checkov_output(data, root)
 
-    unscanned, workflows = check_yaml_files(root, exclude)
     reported = {f.file for f in findings}
-    findings.extend(f for f in unscanned if f.file not in reported)
-    seen = scanned_files(data, "github_actions")
-    findings.extend(
-        _unscanned(rel, "Checkov returned no result for this workflow")
-        for rel in workflows
-        if rel not in seen
-    )
+    findings.extend(f for f in check_yaml_files(root, exclude) if f.file not in reported)
     # Inline-suppressed checks still mean Checkov read the Dockerfile.
     covered = scanned_files(data, "dockerfile", ("passed_checks", "failed_checks", "skipped_checks"))
     for rel in find_dockerfiles(root, exclude):
@@ -349,15 +336,16 @@ def scan_directory(path: str, exclude: tuple[str, ...] = ()) -> list[Finding]:
             finding = check_unscanned_dockerfile(root, rel)
             if finding is not None:
                 findings.append(finding)
-    return [f for f in findings if not is_excluded(f.file, exclude)]
+    # The gha agent owns workflows, even if Checkov's other runners report one (e.g. a parse error).
+    return [f for f in findings if not is_excluded(f.file, exclude) and not is_gha_file(f.file)]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m agents.config_yaml.agent",
         description=(
-            "Read-only scan of a folder for insecure Kubernetes manifests, "
-            "Dockerfiles and GitHub Actions workflows (via Checkov)."
+            "Read-only scan of a folder for insecure Kubernetes manifests "
+            "and Dockerfiles (via Checkov). GitHub Actions: see the gha agent."
         ),
     )
     parser.add_argument("folder", help="folder to scan")

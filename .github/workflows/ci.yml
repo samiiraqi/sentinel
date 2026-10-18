@@ -33,6 +33,7 @@ jobs:
           -r requirements-backend.txt
           -r requirements-terraform.txt
           -r requirements-sast.txt
+          -r requirements-gha.txt
 
       - name: Run tests
         env:

@@ -7,6 +7,7 @@ import pytest
 
 from agents.config_yaml import agent as config_yaml_agent
 from agents.dependencies import agent as dependencies_agent
+from agents.gha import agent as gha_agent
 from agents.sast import agent as sast_agent
 from orchestrator import orchestrator
 from orchestrator.orchestrator import apply_severity, main, run_all, sort_findings
@@ -17,6 +18,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 needs_checkov = pytest.mark.skipif(
     importlib.util.find_spec("checkov") is None,
     reason="checkov not installed (pip install -r requirements-terraform.txt)",
+)
+needs_zizmor = pytest.mark.skipif(
+    gha_agent.zizmor_path() is None,
+    reason="zizmor not installed (pip install -r requirements-gha.txt)",
 )
 needs_bandit = pytest.mark.skipif(
     importlib.util.find_spec("bandit") is None,
@@ -69,7 +74,9 @@ def _snapshot(root: Path) -> dict:
         ("CKV_K8S_16", "medium", "high"),
         ("CKV_K8S_19", "medium", "high"),
         ("CKV_K8S_27", "medium", "high"),
-        ("CKV_GHA_2", "medium", "high"),
+        ("CKV_GHA_2", "medium", "medium"),  # rule removed: the gha agent owns workflows now
+        ("template-injection", "high", "high"),
+        ("gha-unscanned", "low", "low"),
         ("config-unscanned", "low", "low"),
         ("B602", "high", "high"),
         ("B605", "low", "high"),
@@ -175,7 +182,8 @@ def test_integration_includes_config_yaml_findings():
     report = run_all(str(FIXTURES))
     assert report["agents"]["config_yaml"]["status"] == "ok"
     cy = [f for f in report["findings"] if f["agent"] == "config_yaml"]
-    assert {"CKV_K8S_16", "CKV_DOCKER_3", "CKV_GHA_2"} <= {f["rule_id"] for f in cy}
+    assert {"CKV_K8S_16", "CKV_DOCKER_3"} <= {f["rule_id"] for f in cy}
+    assert not any(f["file"].startswith("config_yaml/bad/.github/") for f in cy)  # owned by gha
     assert all(f["file"].startswith("config_yaml/bad/") for f in cy)
     privileged = next(f for f in cy if f["rule_id"] == "CKV_K8S_16")
     assert privileged["severity"] == "high"  # SEVERITY_RULES override
@@ -235,6 +243,35 @@ def test_real_sast_severity_override(tmp_path):
     report = run_all(str(tmp_path))
     by_rule = {f["rule_id"]: f for f in report["findings"] if f["agent"] == "sast"}
     assert by_rule["B605"]["severity"] == "high"
+
+
+def test_gha_agent_is_registered_and_offline():
+    assert orchestrator.AGENTS["gha"] is gha_agent.scan_directory
+    assert "gha" not in orchestrator.NETWORK_AGENTS
+
+
+def test_failed_gha_agent_is_never_clean(tmp_path, monkeypatch, capsys):
+    _all_agents_return(monkeypatch, {})
+
+    def broken(path, exclude=()):
+        raise gha_agent.GhaError(gha_agent.INSTALL_HINT)
+
+    monkeypatch.setitem(orchestrator.AGENTS, "gha", broken)
+    assert main([str(tmp_path)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["agents"]["gha"]["status"] == "failed"
+    assert "zizmor is not installed" in report["agents"]["gha"]["error"]
+
+
+@needs_zizmor
+def test_integration_includes_gha_findings():
+    report = run_all(str(FIXTURES))
+    assert report["agents"]["gha"]["status"] == "ok"
+    gha = [(f["rule_id"], f["severity"], f["file"]) for f in report["findings"] if f["agent"] == "gha"]
+    assert sorted(gha) == [
+        ("excessive-permissions", "medium", "config_yaml/bad/.github/workflows/bad.yml"),
+        ("template-injection", "high", "config_yaml/bad/.github/workflows/bad.yml"),
+    ]
 
 
 def test_run_does_not_modify_files():
@@ -347,6 +384,7 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     monkeypatch.setitem(orchestrator.AGENTS, "terraform", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "config_yaml", plain)
     monkeypatch.setitem(orchestrator.AGENTS, "sast", plain)
+    monkeypatch.setitem(orchestrator.AGENTS, "gha", plain)
 
     report = run_all(str(tmp_path), offline=True)
     assert report["agents"]["dependencies"]["status"] == "failed"
@@ -355,7 +393,8 @@ def test_offline_only_reaches_network_agents(tmp_path, monkeypatch):
     assert report["agents"]["terraform"]["status"] == "ok"
     assert report["agents"]["config_yaml"]["status"] == "ok"
     assert report["agents"]["sast"]["status"] == "ok"
-    assert len(calls) == 4
+    assert report["agents"]["gha"]["status"] == "ok"
+    assert len(calls) == 5
 
 
 def test_cli_offline_flag(tmp_path, monkeypatch, capsys):
