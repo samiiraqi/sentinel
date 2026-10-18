@@ -9,6 +9,7 @@ import pytest
 
 from agents.terraform import agent
 from agents.terraform.agent import main, parse_checkov_output, scan_directory
+from shared import proc as shared_proc
 
 FIXTURES = Path(__file__).parent / "fixtures" / "terraform"
 BAD = FIXTURES / "bad"
@@ -18,6 +19,17 @@ needs_checkov = pytest.mark.skipif(
     importlib.util.find_spec("checkov") is None,
     reason="checkov not installed (pip install -r requirements-terraform.txt)",
 )
+
+
+@pytest.fixture(autouse=True)
+def no_subprocess_run(monkeypatch):
+    """Guard: the agent runs Checkov only through shared.proc. A fake of the old
+    subprocess.run would silently stop intercepting and call real Checkov."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("terraform agent must run Checkov via shared.proc.run_tool, not subprocess.run")
+
+    monkeypatch.setattr(agent.subprocess, "run", fail)
 
 SAMPLE = {
     "check_type": "terraform",
@@ -143,8 +155,8 @@ def test_exclude_does_not_drop_lookalike_files(tmp_path, monkeypatch):
     real_find_spec = importlib.util.find_spec
     monkeypatch.setattr(agent.importlib.util, "find_spec",
                         lambda name, *a: object() if name == "checkov" else real_find_spec(name, *a))
-    monkeypatch.setattr(agent.subprocess, "run",
-                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, json.dumps(output), ""))
+    monkeypatch.setattr(agent, "_run_tool",
+                        lambda cmd, timeout, cwd=None, env=None: subprocess.CompletedProcess(cmd, 1, json.dumps(output), ""))
 
     found = scan_directory(str(tmp_path), exclude=("main.tf", "tests/fixtures"))
     assert {f.file for f in found} == {"xmain.tf", "main.tf.bak", "other/tests/fixtures/a.tf"}
@@ -165,12 +177,12 @@ def _fake_checkov(monkeypatch, returncode=0, stdout="", installed=True, raises=N
         lambda name, *a: (object() if installed else None) if name == "checkov" else real_find_spec(name, *a),
     )
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, timeout, cwd=None, env=None):
         if raises is not None:
             raise raises
         return subprocess.CompletedProcess(cmd, returncode, stdout, "")
 
-    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent, "_run_tool", fake_run)
 
 
 @pytest.mark.parametrize("stdout", ["", "  \n", None], ids=["empty", "whitespace", "none"])
@@ -294,6 +306,11 @@ def test_parse_errors_that_are_not_a_list_are_an_error():
         parse_checkov_output({"results": {"parsing_errors": ROOT + "/main.tf"}}, ROOT)
 
 
+def test_uses_the_shared_process_runner():
+    # Killing Checkov and its children on a timeout is tested in tests/test_proc.py.
+    assert agent._run_tool is shared_proc.run_tool
+
+
 def test_command_does_not_use_quiet(tmp_path, monkeypatch):
     # --quiet drops results.parsing_errors, so the file names would be lost.
     seen = []
@@ -301,11 +318,11 @@ def test_command_does_not_use_quiet(tmp_path, monkeypatch):
     monkeypatch.setattr(agent.importlib.util, "find_spec",
                         lambda name, *a: object() if name == "checkov" else real_find_spec(name, *a))
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, timeout, cwd=None, env=None):
         seen.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, json.dumps(NO_TERRAFORM_SUMMARY), "")
 
-    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent, "_run_tool", fake_run)
     scan_directory(str(tmp_path))
     assert "--quiet" not in seen[0]
     assert "--skip-download" in seen[0]
