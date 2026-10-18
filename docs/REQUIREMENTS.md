@@ -13,6 +13,7 @@
 - [ ] CloudFront agent (checks CloudFront config)
 - [x] SAST agent (Bandit: Python only; TypeScript not covered yet)
 - [x] GHA agent (zizmor) (regular level; Checkov GHA heuristics dropped)
+- [x] Git history secrets agent (secrets rules on git log; secrets no longer in the current files)
 - [ ] DAST agent (scans a running app; needs a design decision because it sends requests, which conflicts with the read-only rule)
 
 ## Approval
