@@ -104,26 +104,35 @@ def _read_text(path: str) -> str | None:
     return data.decode("utf-8", errors="replace")
 
 
-def scan_text(text: str, rel_path: str) -> list[Finding]:
-    findings = []
+def iter_matches(text: str):
+    """Yield (rule, line_no, raw value) for every match in text.
+
+    The raw value must never be stored or printed: callers redact it (or
+    only hash it) right away. Shared with the git_history agent.
+    """
     for line_no, line in enumerate(text.splitlines(), start=1):
         for rule in RULES:
             for match in rule.pattern.finditer(line):
-                if match.group(rule.group).lower() in rule.ignore_values:
+                value = match.group(rule.group)
+                if value.lower() in rule.ignore_values:
                     continue
-                # Redact first; the raw value is never stored.
-                findings.append(
-                    Finding(
-                        agent=AGENT_NAME,
-                        rule_id=rule.rule_id,
-                        severity=rule.severity,
-                        file=rel_path,
-                        line=line_no,
-                        message=rule.message,
-                        redacted_match=redact(match.group(rule.group)),
-                    )
-                )
-    return findings
+                yield rule, line_no, value
+
+
+def scan_text(text: str, rel_path: str) -> list[Finding]:
+    # Redact first; the raw value is never stored.
+    return [
+        Finding(
+            agent=AGENT_NAME,
+            rule_id=rule.rule_id,
+            severity=rule.severity,
+            file=rel_path,
+            line=line_no,
+            message=rule.message,
+            redacted_match=redact(value),
+        )
+        for rule, line_no, value in iter_matches(text)
+    ]
 
 
 def _rel(full: str, root: str) -> str:

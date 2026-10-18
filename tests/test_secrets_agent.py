@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agents.secrets.agent import main, redact, scan_directory, scan_text
+from agents.secrets.agent import iter_matches, main, redact, scan_directory, scan_text
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -230,3 +230,16 @@ def test_cli_exit_code_1_with_findings_0_when_clean(capsys):
     assert main([str(FIXTURES), "--exclude", "aws_config.ini", "--exclude", "fake_key.pem",
                  "--exclude", "settings.py"]) == 0
     capsys.readouterr()
+
+
+def test_iter_matches_is_what_scan_text_reports():
+    # iter_matches is shared with the git_history agent; scan_text is built on it.
+    text = "\n".join(["x", f"aws = {FAKE_AWS_KEY}", "enabled: true", f"key: {FAKE_ANTHROPIC_KEY}"])
+    matches = list(iter_matches(text))
+    assert [(r.rule_id, line, value) for r, line, value in matches] == [
+        ("aws-access-key-id", 2, FAKE_AWS_KEY),
+        ("anthropic-api-key", 4, FAKE_ANTHROPIC_KEY),
+    ]
+    assert [(f.rule_id, f.line, f.redacted_match) for f in scan_text(text, "a.txt")] == [
+        (r.rule_id, line, redact(value)) for r, line, value in matches
+    ]
