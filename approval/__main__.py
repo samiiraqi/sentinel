@@ -8,6 +8,7 @@ databases (it is reported as failed).
 The config_yaml agent (Kubernetes, Dockerfile via Checkov) runs offline.
 The sast agent (Python only, via Bandit) runs offline.
 The gha agent (GitHub Actions workflows and actions, via zizmor) runs offline.
+The git_history agent (secrets in git history, via git log) runs offline.
 """
 
 import argparse

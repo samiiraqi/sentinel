@@ -125,3 +125,11 @@ def test_real_timeout_kills_child_and_grandchild(tmp_path):
                 os.kill(p, 9)
             except (ProcessLookupError, PermissionError):
                 pass
+
+
+def test_run_tool_output_decoding_is_strict_unless_asked():
+    code = "import sys; sys.stdout.buffer.write(b'caf\\xe9\\n')"  # not valid UTF-8
+    with pytest.raises(UnicodeDecodeError):
+        run_tool([sys.executable, "-c", code], timeout=30)
+    proc = run_tool([sys.executable, "-c", code], timeout=30, errors="replace")
+    assert proc.stdout == "caf�\n"

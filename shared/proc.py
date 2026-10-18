@@ -16,16 +16,24 @@ KILL_WAIT_SECONDS = 5
 
 
 def run_tool(
-    cmd: list[str], timeout: float, cwd: str | None = None, env: dict | None = None
+    cmd: list[str],
+    timeout: float,
+    cwd: str | None = None,
+    env: dict | None = None,
+    errors: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a tool in its own process group. On a timeout (or any other error,
-    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
+    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running.
+
+    errors: how undecodable output is handled (e.g. "replace"); None = strict.
+    """
     posix = os.name == "posix"
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors=errors,
         cwd=cwd,
         env=env,
         start_new_session=posix,  # new session: process group id == proc.pid
