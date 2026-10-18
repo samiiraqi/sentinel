@@ -33,7 +33,6 @@ Exit code: 0 = no findings, 1 = findings, 2 = error.
 import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import sysconfig
@@ -41,6 +40,7 @@ import time
 
 from shared.models import SEVERITIES, Finding
 from shared.paths import is_excluded, is_gha_file
+from shared.proc import run_tool as _run_tool
 
 AGENT_NAME = "gha"
 DEFAULT_SEVERITY = "medium"
@@ -48,7 +48,6 @@ UNSCANNED_RULE = "gha-unscanned"
 UNSCANNED_SEVERITY = "low"
 TIMEOUT_SECONDS = 300  # cap for a whole scan
 MIN_RUN_SECONDS = 1.0  # do not start a run with less time than this left
-KILL_WAIT_SECONDS = 5
 MAX_FILE_BYTES = 5 * 1024 * 1024
 # Folders never walked (vendored code, environments, caches); the same as the config_yaml agent.
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".terraform", ".serverless"}
@@ -181,41 +180,6 @@ def zizmor_path() -> str | None:
 def _env() -> dict:
     """zizmor's environment: no GitHub token or host, no ZIZMOR_* settings."""
     return {k: v for k, v in os.environ.items() if k not in SECRET_ENV and not k.startswith("ZIZMOR_")}
-
-
-def _run_tool(cmd: list[str], timeout: float, cwd: str, env: dict) -> subprocess.CompletedProcess:
-    """Run a tool in its own process group. On a timeout (or any other error,
-    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
-    posix = os.name == "posix"
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env=env,
-        start_new_session=posix,  # new session: process group id == proc.pid
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except BaseException:
-        _kill_group(proc, posix)
-        raise
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-
-
-def _kill_group(proc: subprocess.Popen, posix: bool) -> None:
-    if posix:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # already gone
-    else:
-        proc.kill()  # Windows: no process groups here, only the tool itself
-    try:
-        proc.communicate(timeout=KILL_WAIT_SECONDS)  # reap it and drain the pipes
-    except subprocess.TimeoutExpired:
-        proc.wait()
 
 
 def run_zizmor(zizmor: str, root: str, rel_path: str, timeout: float) -> list | None:

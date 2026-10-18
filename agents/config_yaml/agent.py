@@ -25,12 +25,12 @@ import argparse
 import importlib.util
 import json
 import os
-import signal
 import subprocess
 import sys
 
 from shared.models import SEVERITIES, Finding
 from shared.paths import is_excluded, is_gha_file, relative_to_root
+from shared.proc import run_tool as _run_tool
 
 AGENT_NAME = "config_yaml"
 FRAMEWORKS = ("kubernetes", "dockerfile")  # no github_actions: the gha agent owns workflows
@@ -38,7 +38,6 @@ DEFAULT_SEVERITY = "medium"
 UNSCANNED_RULE = "config-unscanned"
 UNSCANNED_SEVERITY = "low"
 TIMEOUT_SECONDS = 300
-KILL_WAIT_SECONDS = 5
 MAX_FILE_BYTES = 5 * 1024 * 1024
 YAML_SUFFIXES = (".yml", ".yaml")
 # Folders never walked for the coverage check (Checkov skips these too, or they hold no config of ours).
@@ -239,41 +238,6 @@ def check_unscanned_dockerfile(root: str, rel_path: str) -> Finding | None:
     if not text.strip():
         return None
     return _unscanned(rel_path, NO_DOCKERFILE_RESULT)
-
-
-def _run_tool(cmd: list[str], timeout: float, cwd: str, env: dict) -> subprocess.CompletedProcess:
-    """Run a tool in its own process group. On a timeout (or any other error,
-    e.g. Ctrl-C) the whole group is killed and reaped, so nothing is left running."""
-    posix = os.name == "posix"
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env=env,
-        start_new_session=posix,  # new session: process group id == proc.pid
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except BaseException:
-        _kill_group(proc, posix)
-        raise
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-
-
-def _kill_group(proc: subprocess.Popen, posix: bool) -> None:
-    if posix:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # already gone
-    else:
-        proc.kill()  # Windows: no process groups here, only the tool itself
-    try:
-        proc.communicate(timeout=KILL_WAIT_SECONDS)  # reap it and drain the pipes
-    except subprocess.TimeoutExpired:
-        proc.wait()
 
 
 def run_checkov(root: str) -> dict | list:
