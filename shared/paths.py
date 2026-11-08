@@ -17,6 +17,10 @@ parsing_errors paths) into a path relative to the scan root.
 is_gha_file says which files the gha agent owns (GitHub Actions workflows
 and action definitions). Other agents skip them, so the same file never
 gets two sets of findings.
+
+is_test_file says which files are test code, by path only: anything under
+a "tests" folder, plus test_*.py and *_test.py. Matching is by whole path
+components, so "src/tests.py" and "latest_data.py" are not test files.
 """
 
 import os
@@ -63,3 +67,12 @@ def is_gha_file(rel_path: str) -> bool:
     if parts[-1] in ACTION_FILES:
         return True
     return parts[-1].endswith(YAML_SUFFIXES) and parts[-3:-1] == [".github", "workflows"]
+
+
+def is_test_file(rel_path: str) -> bool:
+    """True if `rel_path` (relative to the scan root) is under a tests/ folder or named test_*.py / *_test.py."""
+    parts = _parts(rel_path)
+    if not parts:
+        return False
+    name = parts[-1]
+    return "tests" in parts[:-1] or (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py")

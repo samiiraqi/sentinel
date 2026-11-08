@@ -35,6 +35,7 @@ BAD_CODE = {
     "conf.py": "import yaml\n\n\ndef read(text):\n    return yaml.load(text)\n",
 }
 CLEAN_CODE = "def add(a, b):\n    return a + b\n"
+ASSERT_CODE = "def check(value):\n    assert value\n"
 
 # Trimmed from real `bandit -f json` output (1.9.4).
 SAMPLE = {
@@ -190,6 +191,27 @@ def test_paths_outside_root_are_never_shown(name):
 def test_paths_are_relative_to_root():
     data = {"results": [{"test_id": "B1", "filename": "/scan/root/pkg/a.py", "line_number": 1}]}
     assert parse_bandit_output(data, "/scan/root")[0].file == "pkg/a.py"
+
+
+def _assert_result(filename):
+    return {"results": [{"test_id": "B101", "filename": filename, "line_number": 1}]}
+
+
+def test_scan_root_under_a_tests_folder_does_not_hide_asserts():
+    data = _assert_result("/work/tests/project/app.py")
+    assert [f.file for f in parse_bandit_output(data, "/work/tests/project")] == ["app.py"]
+
+
+@pytest.mark.parametrize("name", ["/etc/tests/a.py", "../tests/a.py", "", None])
+def test_assert_with_unknown_path_is_still_reported(name):
+    assert [f.rule_id for f in parse_bandit_output(_assert_result(name), "/scan/root")] == ["B101"]
+
+
+def test_ignored_rules_for_test_files_are_configurable(monkeypatch):
+    data = _assert_result("tests/a.py")
+    assert parse_bandit_output(data) == []
+    monkeypatch.setattr(agent, "TEST_FILE_IGNORED_RULES", frozenset())
+    assert [f.rule_id for f in parse_bandit_output(data)] == ["B101"]
 
 
 # ---------------------------------------------------------------- failures
@@ -388,6 +410,30 @@ def test_real_bandit_password_never_in_output(tmp_path, capsys):
     assert "B105" in out
     assert FAKE_VALUE not in out
     assert FAKE_VALUE not in json.dumps([f.to_dict() for f in findings])
+
+
+@needs_bandit
+@pytest.mark.parametrize("name", ["tests/helpers.py", "pkg/tests/sub/helpers.py", "test_app.py", "pkg/app_test.py"])
+def test_real_bandit_assert_in_test_file_is_not_reported(tmp_path, name):
+    # Exactly no findings: the file also must not turn into sast-unscanned.
+    _write(tmp_path, {name: ASSERT_CODE})
+    assert scan_directory(str(tmp_path)) == []
+
+
+@needs_bandit
+@pytest.mark.parametrize("name", ["app.py", "src/tests.py", "src/test/app.py", "pkg/latest_data.py"])
+def test_real_bandit_assert_in_normal_code_is_reported(tmp_path, name):
+    _write(tmp_path, {name: ASSERT_CODE})
+    assert [(f.rule_id, f.file) for f in scan_directory(str(tmp_path))] == [("B101", name)]
+
+
+@needs_bandit
+@pytest.mark.parametrize("name", ["tests/helpers.py", "test_app.py", "pkg/app_test.py"])
+def test_real_bandit_other_rules_in_test_files_are_reported(tmp_path, name):
+    _write(tmp_path, {name: f"{PW_WORD} = {FAKE_VALUE!r}\n" + ASSERT_CODE + BAD_CODE["shell.py"]})
+    rules = {f.rule_id for f in scan_directory(str(tmp_path))}
+    assert {"B105", "B602"} <= rules
+    assert "B101" not in rules
 
 
 @needs_bandit
