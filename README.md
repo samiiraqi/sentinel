@@ -217,4 +217,4 @@ tests/           pytest suite and fake fixtures
 docs/            requirements checklist
 ```
 
-License: not specified yet.
+License: MIT, see LICENSE.
