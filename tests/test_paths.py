@@ -1,6 +1,31 @@
 import pytest
 
-from shared.paths import is_excluded, is_gha_file, relative_to_root
+from shared.paths import is_excluded, is_gha_file, is_test_file, relative_to_root
+
+
+@pytest.mark.parametrize(
+    "rel_path, expected",
+    [
+        ("tests/helpers.py", True),
+        ("pkg/tests/sub/helpers.py", True),
+        ("./tests/helpers.py", True),
+        ("test_app.py", True),
+        ("pkg/test_app.py", True),
+        ("app_test.py", True),
+        ("pkg/app_test.py", True),
+        ("app.py", False),
+        ("src/tests.py", False),  # a file named tests.py, not a tests/ folder
+        ("src/test/app.py", False),  # only "tests" counts as a folder name
+        ("src/mytests/app.py", False),
+        ("src/tests_old/app.py", False),
+        ("latest_data.py", False),
+        ("contest_app.py", False),
+        ("test_notes.txt", False),
+        ("", False),
+    ],
+)
+def test_is_test_file(rel_path, expected):
+    assert is_test_file(rel_path) is expected
 
 
 @pytest.mark.parametrize(

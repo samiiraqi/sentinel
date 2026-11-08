@@ -13,7 +13,10 @@ passwords) "issue_text" holds the matched string itself.
 THE SCANNED FOLDER CANNOT CHANGE THE SCAN: Bandit runs with our own
 empty config and ini file (so a .bandit file or pyproject.toml in the
 folder cannot turn tests off) and with --ignore-nosec (so "# nosec"
-comments cannot hide findings).
+comments cannot hide findings). The one exception is by path, not by
+anything the folder configures: rules in TEST_FILE_IGNORED_RULES (only
+B101, assert_used) are dropped for test files. Every other rule still
+applies to them.
 
 NEVER LOOKS CLEAN BY ACCIDENT: a missing bandit, a bad exit code, empty
 or invalid output, or a timeout raises SastError. Files Bandit could not
@@ -38,7 +41,7 @@ import tempfile
 import time
 
 from shared.models import SEVERITIES, Finding
-from shared.paths import is_excluded, relative_to_root
+from shared.paths import is_excluded, is_test_file, relative_to_root
 from shared.proc import run_tool as _run_tool
 
 AGENT_NAME = "sast"
@@ -56,6 +59,9 @@ INSTALL_HINT = "bandit is not installed. Run: pip install -r requirements-sast.t
 # Our own empty settings: Bandit's defaults, nothing from the scanned folder.
 EMPTY_CONFIG = "{}\n"
 EMPTY_INI = "[bandit]\n"
+# Bandit rules not reported for test files (shared.paths.is_test_file).
+# B101 is assert_used: asserts are how tests work. All other rules still apply.
+TEST_FILE_IGNORED_RULES = frozenset({"B101"})
 
 
 class SastError(RuntimeError):
@@ -109,18 +115,24 @@ def parse_bandit_output(data: dict, root: str = "/") -> list[Finding]:
 
     Results become findings; entries in "errors" (files Bandit could not
     parse) become sast-unscanned findings. Paths are made relative to
-    root. Bandit's "code" and "issue_text" fields are ignored.
+    root, so a scan root that itself sits under a "tests" folder does not
+    make its files test files. Rules in TEST_FILE_IGNORED_RULES are dropped
+    for test files. Bandit's "code" and "issue_text" fields are ignored.
     """
     findings = []
     for result in data.get("results") or []:
         if not isinstance(result, dict):
             continue
+        rule_id = str(result.get("test_id", ""))
+        rel_path = _rel(result.get("filename"), root)
+        if rule_id in TEST_FILE_IGNORED_RULES and is_test_file(rel_path):
+            continue
         findings.append(
             Finding(
                 agent=AGENT_NAME,
-                rule_id=str(result.get("test_id", "")),
+                rule_id=rule_id,
                 severity=_severity(result.get("issue_severity")),
-                file=_rel(result.get("filename"), root),
+                file=rel_path,
                 line=_line(result.get("line_number")),
                 message=_message(result),
                 redacted_match=str(result.get("test_name", "")),
