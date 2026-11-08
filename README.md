@@ -147,6 +147,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and eve
 1. Checks out the full git history (`fetch-depth: 0`), which the git_history agent scans, and installs the Python dependencies with pinned versions from `constraints-ci.txt`.
 2. Runs the full test suite with `SENTINEL_REQUIRE_ALL_TESTS=1`, so a missing tool can never silently skip tests. Only the opt-in live tests may skip.
 3. Scans this repository for secrets with Sentinel's own secrets agent.
+4. Installs the dashboard's dependencies without running install scripts, then builds and lints it.
 
 Actions are pinned to commit SHAs, the workflow token can only read the repository, and checkout does not keep credentials.
 
@@ -199,7 +200,7 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 - The backend has no login. It is a single-user tool meant for 127.0.0.1 only.
 - `GET /report` runs a full scan on every call and can take minutes, mostly because of the dependencies agent's time budget.
 - The dependencies agent needs network access, and its live tests do not run in CI.
-- The dashboard is not built, linted, or tested in CI.
+- The dashboard is built and linted in CI, but it has no tests.
 - The `requirements-*.txt` files are not pinned; only CI installs pinned versions.
 
 ## Project layout
