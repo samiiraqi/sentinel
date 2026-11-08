@@ -69,7 +69,7 @@ networkx==2.6.3
 numpy==2.5.4
 opentelemetry-api==1.45.1
 orjson==3.13.0
-packageurl-python==0.13.4
+packageurl-python==0.17.6
 packaging==23.2
 platformdirs==4.13.3
 pluggy==1.7.0
