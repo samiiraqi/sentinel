@@ -80,7 +80,7 @@ propcache==0.5.4
 py-serializable==1.1.2
 pycares==4.11.0
 pycep-parser==0.5.1
-pycparser==3.11
+pycparser==3.12
 pydantic==2.14.1
 pydantic_core==2.50.1
 Pygments==2.21.0
