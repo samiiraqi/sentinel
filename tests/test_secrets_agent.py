@@ -126,6 +126,33 @@ def test_ignored_value_does_not_hide_a_later_secret_on_the_same_line():
     assert [(f.rule_id, f.redacted_match) for f in found] == [("generic-secret-assignment", "Fake****")]
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "name==1.2.3",
+        "bc-detect-secrets==1.5.52",
+        'password == "x"',
+        'password == "comparedValue123"',
+    ],
+    # Plain ids: pytest stores test ids in .pytest_cache, which CI scans.
+    ids=lambda _: "line",
+)
+def test_double_equals_is_not_an_assignment(line):
+    assert scan_text(line, "requirements.txt") == []
+
+
+# Key and value are joined at runtime, so this file does not itself trip the
+# scanner when CI scans the repo.
+FAKE_ASSIGNED_VALUE = "FAKE" + "ValueForTestsOnly0123"
+
+
+@pytest.mark.parametrize("prefix", ["token=", "api_key: ", "PASSWORD:="], ids=lambda _: "prefix")
+def test_real_assignment_forms_are_still_found(prefix):
+    found = scan_text(prefix + FAKE_ASSIGNED_VALUE, "x.env")
+    assert [f.rule_id for f in found] == ["generic-secret-assignment"]
+    assert FAKE_ASSIGNED_VALUE not in json.dumps([f.to_dict() for f in found])
+
+
 def test_skips_binary_symlinks_and_ignored_dirs(tmp_path):
     secret_line = f"aws_access_key_id = {FAKE_AWS_KEY}\n".encode()
     (tmp_path / "binary.bin").write_bytes(b"\x00\x01" + secret_line)
