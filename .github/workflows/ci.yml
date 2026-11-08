@@ -43,3 +43,23 @@ jobs:
 
       - name: Scan repo for secrets
         run: python -m agents.secrets.agent . --exclude tests/fixtures --exclude .venv
+
+      # After the secrets scan, so the scan does not see dashboard/node_modules.
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci --ignore-scripts
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Lint dashboard
+        working-directory: dashboard
+        run: npm run lint
