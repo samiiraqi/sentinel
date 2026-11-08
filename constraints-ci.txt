@@ -77,7 +77,7 @@ ply==3.11
 policy_sentry==0.13.2
 prettytable==3.18.0
 propcache==0.5.4
-py-serializable==1.1.2
+py-serializable==2.1.0
 pycares==4.11.0
 pycep-parser==0.5.1
 pycparser==3.11
