@@ -67,7 +67,7 @@ RULES = [
         message="Possible hard-coded password/secret/token/API key",
         pattern=re.compile(
             r"(?i)(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_]*"
-            r"[\"']?\s*[:=]\s*[\"']?([^\s\"'#,;]{4,})"
+            r"[\"']?\s*(?::|=(?!=))\s*[\"']?([^\s\"'#,;]{4,})"
         ),
         group=1,
         ignore_values=BOOLEAN_NULL_LITERALS,
