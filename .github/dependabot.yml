@@ -8,6 +8,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    # These pins are required by checkov / cyclonedx-python-lib and cannot be bumped alone; revisit when checkov is upgraded.
+    ignore:
+      - dependency-name: "aiodns"
+      - dependency-name: "pycep-parser"
+      - dependency-name: "py-serializable"
+      - dependency-name: "packageurl-python"
+      - dependency-name: "dpath"
 
   - package-ecosystem: "npm"
     directory: "/dashboard"
