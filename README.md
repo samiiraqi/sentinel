@@ -76,21 +76,39 @@ Each decision is appended to `audit/decisions.jsonl` with a UTC timestamp, the f
 
 ## Quick start
 
-Requirements: Python 3.12; a current Node.js LTS release for the dashboard; `npm` only if a scanned folder contains `package-lock.json`.
+Requirements:
+
+- Python 3.12. On Debian/Ubuntu, the `python3.12-venv` package may also be needed.
+- `git`, to clone this repository and for the git_history agent.
+- Node.js and `npm` for the dashboard. `dashboard/package.json` does not set a Node version; Vite needs Node `^20.19.0 || >=22.12.0`, and CI uses Node 26.
+- `npm` is also needed by the dependencies agent when a scanned folder contains `package-lock.json`.
+
+Clone the repository and install the Python tools. `constraints-ci.txt` holds the versions CI tests. Run every command from the repo root unless it says `cd dashboard`.
 
 ```bash
+git clone https://github.com/samiiraqi/sentinel.git && cd sentinel
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt -r requirements-backend.txt \
+pip install -c constraints-ci.txt -r requirements-dev.txt -r requirements-backend.txt \
             -r requirements-terraform.txt -r requirements-dependencies.txt \
             -r requirements-sast.txt -r requirements-gha.txt
 ```
 
-Scan a folder from the command line:
+Try it on `tests/fixtures`. That folder contains intentionally fake secrets and insecure examples, so findings are expected. With `--offline`, the dependencies agent refuses to run and shows as failed, so the command exits with `2` on purpose.
 
 ```bash
-# All agents, one merged JSON report (--offline skips the network agent; it then shows as failed)
-python -m orchestrator.orchestrator path/to/project --offline
+# All agents, one merged JSON report
+python -m orchestrator.orchestrator tests/fixtures --offline
+
+# Save the report to a file, outside the clone
+python -m orchestrator.orchestrator tests/fixtures --offline > ../sentinel-report.json
+```
+
+Scan your own folder from the command line:
+
+```bash
+# All agents. Without --offline, the dependencies agent sends package names and versions to PyPI and the npm registry
+python -m orchestrator.orchestrator path/to/project
 
 # One agent on its own
 python -m agents.secrets.agent path/to/project
@@ -111,7 +129,7 @@ SENTINEL_SCAN_PATH=path/to/project SENTINEL_DEPS_TIME_BUDGET=120 python -m backe
 
 # Terminal 2: dashboard on http://127.0.0.1:5173
 cd dashboard
-npm install
+npm ci
 npm run dev
 ```
 
@@ -178,6 +196,7 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 
 **Scanning gaps**
 - The secrets agent has only four rules, and the generic assignment rule can report false positives.
+- The generic assignment rule does not report an unquoted value that really starts with `=` (for example `password==abc123`), because that is far more likely a comparison or a version pin.
 - The git_history agent uses the same four rules. It does not scan merge commits (a secret added while resolving a merge conflict is missed), reflogs, or unreachable objects (for example commits left behind by a force-push or rebase). Partial clones are refused, because reading them could fetch missing objects from the network.
 - The git_history agent puts the commit id inside the `file` field (`path@<12-char commit>`). This is a deliberate trade-off: the fingerprint is `agent|rule_id|file|line`, so without the commit two different secrets on the same line in two commits would share one fingerprint, and approving one would approve the other. A separate `commit` field would need changes to the finding model, the dashboard, and the audit log.
 - The secrets agent silently skips files over 5 MB, binary files, and symlinks, so a secret in such a file is not reported. It also does not look inside `.git`, `.venv`, or `node_modules`.
@@ -201,7 +220,7 @@ The full checklist is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 - `GET /report` runs a full scan on every call and can take minutes, mostly because of the dependencies agent's time budget.
 - The dependencies agent needs network access, and its live tests do not run in CI.
 - The dashboard is built and linted in CI, but it has no tests.
-- The `requirements-*.txt` files are not pinned; only CI installs pinned versions.
+- The `requirements-*.txt` files are unpinned. `constraints-ci.txt` holds the tested versions, and the quick start installs with it. It does not pin `pip-audit` or the packages only `pip-audit` needs, because CI does not install them.
 
 ## Project layout
 
